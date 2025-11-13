@@ -48,8 +48,10 @@ Discussion (Telegram): https://t.me/open_chinese_convert
 
 Warning: **This is NOT an API.** You will be banned if you make calls programmatically.
 
-https://opencc.byvoid.com/](https://opencc-web.onrender.com/
+https://opencc-web.onrender.com/
 (PS: 此伺服器託管於render.com，久沒使用重新啟用時，需要重新開啟，請稍等一下即可!)
+請參考該網站之原始專案網址: https://github.com/anomixer/OpenCC-web
+
 
 ### Node.js
 
