@@ -40,8 +40,7 @@ Discussion (Telegram): https://t.me/open_chinese_convert
 
 ### Prebuilt 預編譯
 
-* Windows (x86_64): [Latest build](https://ci.appveyor.com/api/projects/Carbo/opencc/artifacts/OpenCC.zip?branch=master&job=Environment:%20nodejs_version=none;%20Platform:%20x64)
-* Windows (x86): [Latest build](https://ci.appveyor.com/api/projects/Carbo/opencc/artifacts/OpenCC.zip?branch=master&job=Environment:%20nodejs_version=none;%20Platform:%20x86)
+* Windows (x86_64): [Latest build]([https://ci.appveyor.com/api/projects/Carbo/opencc/artifacts/OpenCC.zip?branch=master&job=Environment:%20nodejs_version=none;%20Platform:%20x64](https://github.com/anomixer/OpenCC/releases))
 
 ## Usage 使用
 
@@ -49,7 +48,8 @@ Discussion (Telegram): https://t.me/open_chinese_convert
 
 Warning: **This is NOT an API.** You will be banned if you make calls programmatically.
 
-https://opencc.byvoid.com/
+https://opencc.byvoid.com/](https://opencc-web.onrender.com/
+(PS: 此伺服器託管於render.com，久沒使用重新啟用時，需要重新開啟，請稍等一下即可!)
 
 ### Node.js
 
