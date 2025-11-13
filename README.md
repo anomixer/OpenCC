@@ -49,7 +49,7 @@ Discussion (Telegram): https://t.me/open_chinese_convert
 Warning: **This is NOT an API.** You will be banned if you make calls programmatically.
 
 * https://opencc-web.onrender.com/
-  (部署於render.com，久未使用且重新啟用時，需要重新開啟，請稍等一下即可!)
+  (部署於render.com，若待機時，請稍待一下即可使用!)
 * 請參考該網站之原始專案網址: https://github.com/anomixer/OpenCC-web
 
 
