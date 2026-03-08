@@ -46,12 +46,10 @@ Discussion (Telegram): https://t.me/open_chinese_convert
 
 ### Online demo 線上轉換展示
 
-Warning: **This is NOT an API.** You will be banned if you make calls programmatically.
-
 * https://opencc-web.onrender.com/
   (部署於render.com，若待機時，請稍待一下即可使用!)
+* https://opencc.js.org/converter?config=s2t
 * 請參考該網站之原始專案網址: https://github.com/anomixer/OpenCC-web
-
 
 ### Node.js
 
