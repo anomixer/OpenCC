@@ -21,6 +21,13 @@
 #include <list>
 #include <unordered_map>
 
+#if defined(_WIN32) || defined(_WIN64)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 #include <rapidjson/document.h>
 
 #include "Config.hpp"
@@ -41,6 +48,129 @@ typedef rapidjson::GenericValue<rapidjson::UTF8<char>> JSONValue;
 namespace opencc {
 
 namespace {
+
+std::string GetParentDirectory(const std::string& path);
+
+#if defined(_WIN32) || defined(_WIN64)
+std::string Utf8FromWide(const std::wstring& wide) {
+  if (wide.empty()) {
+    return "";
+  }
+  int requiredSize = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr,
+                                         0, nullptr, nullptr);
+  if (requiredSize <= 1) {
+    return "";
+  }
+  std::string utf8(static_cast<size_t>(requiredSize), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, utf8.data(), requiredSize,
+                      nullptr, nullptr);
+  utf8.resize(static_cast<size_t>(requiredSize - 1));
+  return utf8;
+}
+
+std::wstring WideFromUtf8(const std::string& utf8) {
+  if (utf8.empty()) {
+    return L"";
+  }
+  int requiredSize =
+      MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+  if (requiredSize <= 1) {
+    return L"";
+  }
+  std::wstring wide(static_cast<size_t>(requiredSize), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), requiredSize);
+  wide.resize(static_cast<size_t>(requiredSize - 1));
+  return wide;
+}
+
+std::string NormalizeModulePath(const std::string& path) {
+  if (path.empty()) {
+    return "";
+  }
+
+  std::wstring widePath = WideFromUtf8(path);
+  if (widePath.empty()) {
+    return path;
+  }
+
+  HANDLE handle =
+      CreateFileW(widePath.c_str(), 0,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return path;
+  }
+
+  std::wstring finalPath(MAX_PATH, L'\0');
+  for (;;) {
+    DWORD copied =
+        GetFinalPathNameByHandleW(handle, finalPath.data(),
+                                  static_cast<DWORD>(finalPath.size()),
+                                  FILE_NAME_NORMALIZED);
+    if (copied == 0) {
+      CloseHandle(handle);
+      return path;
+    }
+    if (copied < finalPath.size()) {
+      finalPath.resize(copied);
+      break;
+    }
+    finalPath.resize(copied + 1);
+  }
+  CloseHandle(handle);
+
+  const std::wstring uncPrefix = L"\\\\?\\UNC\\";
+  const std::wstring localPrefix = L"\\\\?\\";
+  if (finalPath.rfind(uncPrefix, 0) == 0) {
+    finalPath = L"\\" + finalPath.substr(7);
+  } else if (finalPath.rfind(localPrefix, 0) == 0) {
+    finalPath = finalPath.substr(4);
+  }
+  return Utf8FromWide(finalPath);
+}
+
+std::string GetModulePath(HMODULE module) {
+  std::wstring buffer(MAX_PATH, L'\0');
+  for (;;) {
+    DWORD copied =
+        GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (copied == 0) {
+      return "";
+    }
+    if (copied < buffer.size() - 1) {
+      buffer.resize(copied);
+      return NormalizeModulePath(Utf8FromWide(buffer));
+    }
+    buffer.resize(buffer.size() * 2);
+  }
+}
+
+std::string GetCurrentProcessModulePath() {
+  return GetModulePath(nullptr);
+}
+
+std::string GetCurrentLibraryModulePath() {
+  HMODULE module = nullptr;
+  if (!GetModuleHandleExW(
+          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(&GetCurrentLibraryModulePath), &module)) {
+    return "";
+  }
+  return GetModulePath(module);
+}
+
+void AppendWindowsPortableSearchPaths(std::vector<std::string>& paths,
+                                      const std::string& modulePath) {
+  const std::string parent = GetParentDirectory(modulePath);
+  if (parent.empty()) {
+    return;
+  }
+  paths.push_back(parent);
+  paths.push_back(parent + "../share/opencc");
+}
+#endif
 
 class ConfigInternal {
 public:
@@ -257,6 +387,13 @@ ConverterPtr Config::NewFromFile(const std::string& fileName,
       impl->paths.push_back(parent);
     }
   }
+#if defined(_WIN32) || defined(_WIN64)
+  if (argv0 != nullptr) {
+    AppendWindowsPortableSearchPaths(impl->paths, argv0);
+  }
+  AppendWindowsPortableSearchPaths(impl->paths, GetCurrentProcessModulePath());
+  AppendWindowsPortableSearchPaths(impl->paths, GetCurrentLibraryModulePath());
+#endif
   if (PACKAGE_DATA_DIRECTORY != "") {
     impl->paths.push_back(PACKAGE_DATA_DIRECTORY);
   }
