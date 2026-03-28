@@ -1,7 +1,7 @@
 /*
  * Open Chinese Convert
  *
- * Copyright 2020 Carbo Kuo <byvoid@byvoid.com>
+ * Copyright 2020-2026 Carbo Kuo and contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -123,7 +123,7 @@ void SerializedValues::ConstructBuffer(std::string* valueBuffer,
   }
   // Write values to the buffer.
   valueBuffer->resize(*valueTotalLength, '\0');
-  char* pValueBuffer = const_cast<char*>(valueBuffer->c_str());
+  char* pValueBuffer = valueBuffer->data();
   for (const std::unique_ptr<DictEntry>& entry : *lexicon) {
     for (const auto& value : entry->Values()) {
       strcpy(pValueBuffer, value.c_str());
@@ -131,5 +131,5 @@ void SerializedValues::ConstructBuffer(std::string* valueBuffer,
       pValueBuffer += value.length() + 1;
     }
   }
-  assert(valueBuffer->c_str() + *valueTotalLength == pValueBuffer);
+  assert(valueBuffer->data() + *valueTotalLength == pValueBuffer);
 }

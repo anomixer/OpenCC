@@ -41,18 +41,10 @@ option(USE_SYSTEM_TCLAP "Use system version of TCLAP" OFF)
 ######## Package information
 set (PACKAGE_URL https://github.com/BYVoid/OpenCC)
 set (PACKAGE_BUGREPORT https://github.com/BYVoid/OpenCC/issues)
-set (OPENCC_VERSION_MAJOR 1)
-set (OPENCC_VERSION_MINOR 2)
-set (OPENCC_VERSION_REVISION 0)
 
-if (CMAKE_BUILD_TYPE MATCHES Debug)
-  set (version_suffix .Debug)
-endif (CMAKE_BUILD_TYPE MATCHES Debug)
-
-set (
-  OPENCC_VERSION
-  ${OPENCC_VERSION_MAJOR}.${OPENCC_VERSION_MINOR}.${OPENCC_VERSION_REVISION}${version_suffix}
-)
+# Derive version from Git tags (falls back to hardcoded default when Git is unavailable)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+include(GitVersion)
 
 set(CPACK_SOURCE_PACKAGE_FILE_NAME
   "${PACKAGE_NAME}-${OPENCC_VERSION_MAJOR}.${OPENCC_VERSION_MINOR}.${OPENCC_VERSION_REVISION}"
@@ -78,17 +70,33 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 endif()
 
 ######## Directory
+# Installation directories follow GNU Coding Standards via CMake's GNUInstallDirs module:
+# https://cmake.org/cmake/help/latest/module/GNUInstallDirs.html
+#
+# Default values and parity with previously hardcoded paths
+# (shown for CMAKE_INSTALL_PREFIX=/usr/local and /usr):
+#
+#   CMAKE_INSTALL_INCLUDEDIR     "include"  -> /usr/local/include  or  /usr/include
+#     (replaces: ${CMAKE_INSTALL_PREFIX}/include)
+#
+#   CMAKE_INSTALL_SYSCONFDIR     "etc"      -> /usr/local/etc      or  /etc
+#     (replaces: ${CMAKE_INSTALL_PREFIX}/etc)
+#     NOTE: when prefix is /usr the full path is /etc per GNU Coding Standards,
+#           whereas the old code would have produced /usr/etc.
+#
+#   CMAKE_INSTALL_LIBDIR         "lib"      -> /usr/local/lib      or  /usr/lib
+#     (also resolves to lib64 or lib/<multiarch> on applicable platforms)
+#     (replaces: ${CMAKE_INSTALL_PREFIX}/lib[64])
+#
+#   CMAKE_INSTALL_DATAROOTDIR    "share"    -> /usr/local/share    or  /usr/share
+#     (replaces: ${CMAKE_INSTALL_PREFIX}/share)
 
-set(LIB_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}" CACHE PATH "")
-if(CMAKE_INSTALL_LIBDIR MATCHES "lib64$")
-  set(LIB_SUFFIX 64)
-endif()
-
-set (DIR_PREFIX ${CMAKE_INSTALL_PREFIX})
-set (DIR_INCLUDE ${DIR_PREFIX}/include)
-set (DIR_SHARE ${DIR_PREFIX}/share)
-set (DIR_ETC ${DIR_PREFIX}/etc)
-set (DIR_LIBRARY ${DIR_PREFIX}/lib${LIB_SUFFIX})
+# All DIR_* variables use relative paths so that install() destinations and
+# CMake package config files remain relocatable.
+set (DIR_INCLUDE ${CMAKE_INSTALL_INCLUDEDIR})
+set (DIR_ETC ${CMAKE_INSTALL_SYSCONFDIR})
+set (DIR_LIBRARY ${CMAKE_INSTALL_LIBDIR})
+set (DIR_SHARE ${CMAKE_INSTALL_DATAROOTDIR})
 
 if (DEFINED SHARE_INSTALL_PREFIX)
   set (DIR_SHARE ${SHARE_INSTALL_PREFIX})
@@ -107,7 +115,20 @@ if (DEFINED LIB_INSTALL_DIR)
 endif (DEFINED LIB_INSTALL_DIR)
 
 set (DIR_SHARE_OPENCC ${DIR_SHARE}/opencc)
-set (DIR_SHARE_LOCALE ${DIR_SHARE}/locale)
+
+# Compute absolute paths needed for compile-time macros (PKGDATADIR/LOCALEDIR)
+# and for the pkg-config file.  We must handle both the GNUInstallDirs relative
+# defaults and user-supplied absolute override paths (SHARE_INSTALL_PREFIX etc.).
+foreach (_gnu_dir SHARE INCLUDE LIBRARY)
+  if (IS_ABSOLUTE "${DIR_${_gnu_dir}}")
+    set (DIR_${_gnu_dir}_FULL "${DIR_${_gnu_dir}}")
+  else ()
+    set (DIR_${_gnu_dir}_FULL "${CMAKE_INSTALL_PREFIX}/${DIR_${_gnu_dir}}")
+  endif ()
+endforeach ()
+
+set (DIR_SHARE_OPENCC_FULL ${DIR_SHARE_FULL}/opencc)
+set (DIR_SHARE_LOCALE_FULL ${DIR_SHARE_FULL}/locale)
 
 ######## Configuration
 
@@ -152,8 +173,8 @@ install(
 ######## Compiler flags
 
 add_definitions(
-  -DPKGDATADIR="${DIR_SHARE_OPENCC}"
-  -DLOCALEDIR="${DIR_SHARE_LOCALE}"
+  -DPKGDATADIR="${DIR_SHARE_OPENCC_FULL}"
+  -DLOCALEDIR="${DIR_SHARE_LOCALE_FULL}"
   -DVERSION="${OPENCC_VERSION}"
   -DPACKAGE_NAME="${PACKAGE_NAME}"
 )
