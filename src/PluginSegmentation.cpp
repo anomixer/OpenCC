@@ -21,10 +21,12 @@
 #include "Exception.hpp"
 #include "Segmentation.hpp"
 #include "Segments.hpp"
+#include "UTF8Util.hpp"
 #include "plugin/OpenCCPlugin.h"
 
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -78,6 +80,18 @@ bool IsTruthy(const char* value) {
   const std::string text(value);
   return text == "1" || text == "true" || text == "TRUE" || text == "yes" ||
          text == "on";
+}
+
+bool IsReadableFile(const std::string& path) {
+#if defined(_WIN32) || defined(_WIN64)
+  const DWORD attributes =
+      GetFileAttributesW(internal::WideFromUtf8(path).c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES &&
+         (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+  std::ifstream ifs(path.c_str(), std::ios::binary);
+  return ifs.is_open();
+#endif
 }
 
 std::vector<std::string> SplitSearchPath(const char* raw) {
@@ -201,15 +215,15 @@ private:
 
 struct PluginLibrary {
   std::shared_ptr<SharedLibrary> library;
-  const opencc_segmentation_plugin_v1* descriptor = nullptr;
+  const opencc_segmentation_plugin_v2* descriptor = nullptr;
 };
 
 size_t RequiredDescriptorSize() {
-  return offsetof(opencc_segmentation_plugin_v1, free_error) +
-         sizeof(((opencc_segmentation_plugin_v1*)nullptr)->free_error);
+  return offsetof(opencc_segmentation_plugin_v2, free_error) +
+         sizeof(((opencc_segmentation_plugin_v2*)nullptr)->free_error);
 }
 
-std::string TakeErrorMessage(const opencc_segmentation_plugin_v1* descriptor,
+std::string TakeErrorMessage(const opencc_segmentation_plugin_v2* descriptor,
                              opencc_error_t* error,
                              const std::string& fallback) {
   if (error == nullptr) {
@@ -223,7 +237,7 @@ std::string TakeErrorMessage(const opencc_segmentation_plugin_v1* descriptor,
   return message;
 }
 
-[[noreturn]] void ThrowPluginError(const opencc_segmentation_plugin_v1* descriptor,
+[[noreturn]] void ThrowPluginError(const opencc_segmentation_plugin_v2* descriptor,
                                    opencc_error_t* error,
                                    const std::string& pluginType,
                                    const std::string& fallbackPrefix,
@@ -231,6 +245,43 @@ std::string TakeErrorMessage(const opencc_segmentation_plugin_v1* descriptor,
   const std::string message =
       TakeErrorMessage(descriptor, error, fallbackMessage);
   throw Exception(fallbackPrefix + " '" + pluginType + "': " + message);
+}
+
+SegmentsPtr BuildSegmentsFromLengths(const std::string& text,
+                                     const opencc_segment_length_array_t& lengths) {
+  SegmentsPtr segments(new Segments);
+  const char* bytes = text.c_str();
+  const size_t inputSize = std::strlen(bytes);
+  size_t byteOffset = 0;
+
+  for (size_t i = 0; i < lengths.segment_count; i++) {
+    const uint32_t codepointLength = lengths.codepoint_lengths[i];
+    if (codepointLength == 0) {
+      throw Exception("Segmentation plugin returned a zero-length segment.");
+    }
+
+    const size_t segmentStart = byteOffset;
+    for (uint32_t j = 0; j < codepointLength; j++) {
+      if (byteOffset >= inputSize) {
+        throw Exception("Segmentation plugin returned lengths past end of input.");
+      }
+      const size_t charLength = UTF8Util::NextCharLengthNoException(bytes + byteOffset);
+      if (charLength == 0 || byteOffset + charLength > inputSize) {
+        throw Exception("Input text is not valid UTF-8.");
+      }
+      byteOffset += charLength;
+    }
+
+    segments->AddSegment(text.substr(segmentStart, byteOffset - segmentStart));
+  }
+
+  if (byteOffset != inputSize) {
+    throw Exception("Segmentation plugin lengths do not cover the full input. "
+                    "Consumed bytes: " + std::to_string(byteOffset) +
+                    ", total bytes: " + std::to_string(inputSize) +
+                    ", segments: " + std::to_string(lengths.segment_count) + ".");
+  }
+  return segments;
 }
 
 class PluginSegmentationAdapter : public Segmentation {
@@ -247,35 +298,30 @@ public:
   }
 
   SegmentsPtr Segment(const std::string& text) const override {
-    opencc_token_array_t tokenArray = {};
-    tokenArray.struct_size = sizeof(tokenArray);
+    opencc_segment_length_array_t segmentLengths = {};
+    segmentLengths.struct_size = sizeof(segmentLengths);
     opencc_error_t error = {};
     error.struct_size = sizeof(error);
     opencc_segmentation_segment_args_t args = {};
     args.struct_size = sizeof(args);
     args.handle = handle_;
     args.utf8_text = text.c_str();
-    args.token_array = &tokenArray;
+    args.segment_lengths = &segmentLengths;
     args.error = &error;
     const int status = plugin_->descriptor->segment(&args);
 
-    struct TokenGuard {
-      const opencc_segmentation_plugin_v1* desc;
-      opencc_token_array_t* arr;
-      ~TokenGuard() { desc->free_tokens(arr); }
-    } guard{plugin_->descriptor, &tokenArray};
+    struct SegmentLengthGuard {
+      const opencc_segmentation_plugin_v2* desc;
+      opencc_segment_length_array_t* arr;
+      ~SegmentLengthGuard() { desc->free_segment_lengths(arr); }
+    } guard{plugin_->descriptor, &segmentLengths};
 
     if (status != 0) {
       ThrowPluginError(plugin_->descriptor, &error,
                        plugin_->descriptor->segmentation_type,
                        "Segmentation plugin failed", "unknown error");
     }
-
-    SegmentsPtr segments(new Segments);
-    for (size_t i = 0; i < tokenArray.token_count; i++) {
-      segments->AddSegment(std::string(tokenArray.tokens[i]));
-    }
-    return segments;
+    return BuildSegmentsFromLengths(text, segmentLengths);
   }
 
 private:
@@ -297,18 +343,34 @@ public:
     }
 
     const std::vector<std::string> searchDirs = BuildSearchDirs();
-    const std::string fileName = GetPluginFileName(type);
+    const std::vector<std::string> fileNames = GetPluginFileNames(type);
     std::ostringstream attempted;
     bool first = true;
     for (const auto& dir : searchDirs) {
-      const std::string candidate = JoinPath(dir, fileName);
-      if (!first) {
-        attempted << ", ";
+      std::vector<std::string> matches;
+      for (const auto& fileName : fileNames) {
+        const std::string candidate = JoinPath(dir, fileName);
+        if (!first) {
+          attempted << ", ";
+        }
+        first = false;
+        attempted << candidate;
+        if (IsReadableFile(candidate)) {
+          matches.push_back(candidate);
+        }
       }
-      first = false;
-      attempted << candidate;
+
+      if (matches.size() > 1) {
+        throw Exception("Multiple segmentation plugin libraries found for '" +
+                        type + "' in directory '" + dir +
+                        "'. Keep only one matching DLL per plugin type.");
+      }
+      if (matches.empty()) {
+        continue;
+      }
       try {
-        std::shared_ptr<PluginLibrary> plugin = LoadFromPath(candidate, type);
+        std::shared_ptr<PluginLibrary> plugin =
+            LoadFromPath(matches.front(), type);
         cache_[type] = plugin;
         return plugin;
       } catch (const Exception&) {
@@ -319,13 +381,17 @@ public:
   }
 
 private:
-  static std::string GetPluginFileName(const std::string& type) {
+  static std::vector<std::string> GetPluginFileNames(const std::string& type) {
 #if defined(_WIN32) || defined(_WIN64)
-    return "opencc-" + type + ".dll";
+    return {
+        "opencc-" + type + ".dll",
+        "libopencc-" + type + ".dll",
+        "msys-opencc-" + type + ".dll",
+    };
 #elif defined(__APPLE__)
-    return "libopencc-" + type + ".dylib";
+    return {"libopencc-" + type + ".dylib"};
 #else
-    return "libopencc-" + type + ".so";
+    return {"libopencc-" + type + ".so"};
 #endif
   }
 
@@ -336,7 +402,11 @@ private:
 
     const std::string currentLibraryDir = GetCurrentLibraryDirectory();
     if (!currentLibraryDir.empty()) {
+#if defined(_WIN32) || defined(_WIN64)
+      AppendUnique(dirs, JoinPath(currentLibraryDir, "plugins"));
+#else
       AppendUnique(dirs, JoinPath(currentLibraryDir, "opencc/plugins"));
+#endif
       AppendUnique(dirs, currentLibraryDir);
     }
     return dirs;
@@ -345,10 +415,10 @@ private:
   static std::shared_ptr<PluginLibrary> LoadFromPath(const std::string& path,
                                                      const std::string& type) {
     std::shared_ptr<SharedLibrary> library(new SharedLibrary(path));
-    typedef const opencc_segmentation_plugin_v1* (*EntryPoint)(void);
+    typedef const opencc_segmentation_plugin_v2* (*EntryPoint)(void);
     EntryPoint entryPoint = reinterpret_cast<EntryPoint>(
-        library->FindSymbol("opencc_get_segmentation_plugin_v1"));
-    const opencc_segmentation_plugin_v1* descriptor = entryPoint();
+        library->FindSymbol("opencc_get_segmentation_plugin_v2"));
+    const opencc_segmentation_plugin_v2* descriptor = entryPoint();
     if (descriptor == nullptr) {
       throw Exception("Plugin returned null descriptor.");
     }

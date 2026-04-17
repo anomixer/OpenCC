@@ -19,6 +19,7 @@
 #include "Exception.hpp"
 #include "JiebaSegmentation.hpp"
 #include "Segments.hpp"
+#include "UTF8Util.hpp"
 #include "plugin/OpenCCPlugin.h"
 
 #include <cstdlib>
@@ -28,7 +29,26 @@
 #include <string>
 #include <vector>
 
-#include "Application.hpp"
+#include "cppjieba/Jieba.hpp"
+
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+namespace {
+std::wstring LocalWideFromUtf8(const std::string& utf8) {
+  if (utf8.empty()) {
+    return L"";
+  }
+  int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+  if (size <= 1) {
+    return L"";
+  }
+  std::wstring wide(static_cast<size_t>(size), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], size);
+  wide.resize(static_cast<size_t>(size - 1));
+  return wide;
+}
+}  // namespace
+#endif
 
 struct opencc_segmentation_handle {
   explicit opencc_segmentation_handle(
@@ -51,8 +71,14 @@ bool IsAbsolutePath(const std::string& path) {
 }
 
 bool IsReadableFile(const std::string& path) {
+#if defined(_WIN32) || defined(_WIN64)
+  const DWORD attributes = GetFileAttributesW(LocalWideFromUtf8(path).c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES &&
+         (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
   std::ifstream ifs(path.c_str());
   return ifs.is_open();
+#endif
 }
 
 std::string ParentDir(const std::string& path) {
@@ -108,6 +134,10 @@ bool ReadConfigValue(const opencc_kv_pair_t* config,
   return false;
 }
 
+uint32_t CodePointLength(const std::string& text) {
+  return static_cast<uint32_t>(opencc::UTF8Util::Length(text.c_str()));
+}
+
 std::string ResolveResourcePath(const std::string& rawPath,
                                 const std::string& configDir) {
   if (rawPath.empty()) {
@@ -130,6 +160,16 @@ std::string ResolveResourcePath(const std::string& rawPath,
       if (IsReadableFile(parentCandidate)) {
         return parentCandidate;
       }
+      const std::string parentParent = ParentDir(parent);
+      if (!parentParent.empty()) {
+        const std::string basename = rawPath.substr(rawPath.find_last_of("/\\") == std::string::npos
+                                                        ? 0
+                                                        : rawPath.find_last_of("/\\") + 1);
+        const std::string devCandidate = JoinPath(parentParent, "deps/cppjieba/dict/" + basename);
+        if (IsReadableFile(devCandidate)) {
+          return devCandidate;
+        }
+      }
     }
   }
   const char* dataDir = std::getenv("OPENCC_DATA_DIR");
@@ -146,13 +186,7 @@ std::string ResolveResourcePath(const std::string& rawPath,
     }
   }
 
-  const std::string devFallback = JoinPath("deps/libcppjieba/dict/",
-                                           rawPath.substr(rawPath.find_last_of("/\\") == std::string::npos
-                                                              ? 0
-                                                              : rawPath.find_last_of("/\\") + 1));
-  if (IsReadableFile(devFallback)) {
-    return devFallback;
-  }
+
   return rawPath;
 }
 
@@ -166,11 +200,12 @@ std::string ResolveAuxPath(const std::string& dictPath,
       return candidate;
     }
   }
-  const std::string needle = "data/jieba_dict/";
+  // Development fallback: try deps/cppjieba/dict/ relative to the source tree
+  const std::string needle = "share/opencc/jieba_dict/";
   const std::string::size_type needlePos = dictPath.find(needle);
   if (needlePos != std::string::npos) {
     std::string alt = dictPath;
-    alt.replace(needlePos, needle.size(), "deps/libcppjieba/dict/");
+    alt.replace(needlePos, needle.size(), "plugins/jieba/deps/cppjieba/dict/");
     const std::string::size_type altPos = alt.find_last_of("/\\");
     if (altPos != std::string::npos) {
       const std::string altCandidate = alt.substr(0, altPos + 1) + fileName;
@@ -189,6 +224,7 @@ int CreateJiebaSegmentation(opencc_segmentation_create_args_t* args) {
              OPENCC_ERROR_INVALID_ARGUMENT, "Output handle is null.");
     return -1;
   }
+  *args->out = nullptr;
 
   std::string configDir;
   std::string dictPath;
@@ -225,17 +261,17 @@ int CreateJiebaSegmentation(opencc_segmentation_create_args_t* args) {
   }
 
   try {
-    std::unique_ptr<CppJieba::Application> app(
-        new CppJieba::Application(dictPath, modelPath, userDictPath, idfPath,
+    std::unique_ptr<cppjieba::Jieba> app(
+        new cppjieba::Jieba(dictPath, modelPath, userDictPath, idfPath,
                                   stopWordsPath));
     class PluginJiebaSegmentation : public opencc::Segmentation {
     public:
-      explicit PluginJiebaSegmentation(std::unique_ptr<CppJieba::Application> app)
+      explicit PluginJiebaSegmentation(std::unique_ptr<cppjieba::Jieba> app)
           : app_(std::move(app)) {}
       opencc::SegmentsPtr Segment(const std::string& text) const override {
         opencc::SegmentsPtr segments(new opencc::Segments);
         std::vector<std::string> words;
-        app_->cut(text, words, CppJieba::METHOD_MIX);
+        app_->Cut(text, words, true);
         for (const auto& word : words) {
           segments->AddSegment(word);
         }
@@ -243,7 +279,7 @@ int CreateJiebaSegmentation(opencc_segmentation_create_args_t* args) {
       }
 
     private:
-      std::unique_ptr<CppJieba::Application> app_;
+      std::unique_ptr<cppjieba::Jieba> app_;
     };
     std::unique_ptr<opencc::Segmentation> segmentation(
         new PluginJiebaSegmentation(std::move(app)));
@@ -263,22 +299,19 @@ opencc::Segmentation* GetSegmentation(opencc_segmentation_handle_t* handle) {
   return handle->segmentation.get();
 }
 
-void FreeTokens(opencc_token_array_t* tokenArray) {
-  if (tokenArray == nullptr || tokenArray->tokens == nullptr) {
+void FreeSegmentLengths(opencc_segment_length_array_t* segmentLengths) {
+  if (segmentLengths == nullptr || segmentLengths->codepoint_lengths == nullptr) {
     return;
   }
-  for (size_t i = 0; i < tokenArray->token_count; i++) {
-    delete[] tokenArray->tokens[i];
-  }
-  delete[] tokenArray->tokens;
-  tokenArray->tokens = nullptr;
-  tokenArray->token_count = 0;
+  delete[] segmentLengths->codepoint_lengths;
+  segmentLengths->codepoint_lengths = nullptr;
+  segmentLengths->segment_count = 0;
 }
 
 int SegmentWithJieba(opencc_segmentation_segment_args_t* args) {
   if (args == nullptr || args->struct_size < sizeof(*args) ||
-      args->handle == nullptr || args->token_array == nullptr ||
-      args->token_array->struct_size < sizeof(*args->token_array) ||
+      args->handle == nullptr || args->segment_lengths == nullptr ||
+      args->segment_lengths->struct_size < sizeof(*args->segment_lengths) ||
       args->utf8_text == nullptr) {
     SetError(args == nullptr ? nullptr : args->error,
              OPENCC_ERROR_INVALID_ARGUMENT,
@@ -288,22 +321,41 @@ int SegmentWithJieba(opencc_segmentation_segment_args_t* args) {
   try {
     opencc::SegmentsPtr segments =
         GetSegmentation(args->handle)->Segment(args->utf8_text);
-    args->token_array->tokens = nullptr;
-    args->token_array->token_count = segments->Length();
-    args->token_array->tokens = new char*[args->token_array->token_count]();
-    for (size_t i = 0; i < args->token_array->token_count; i++) {
-      const char* token = segments->At(i);
-      const size_t length = std::strlen(token);
-      args->token_array->tokens[i] = new char[length + 1];
-      std::memcpy(args->token_array->tokens[i], token, length + 1);
+    const std::string text(args->utf8_text);
+    std::vector<uint32_t> lengths;
+    lengths.reserve(segments->Length() + 1);
+    size_t byteOffset = 0;
+
+    for (size_t i = 0; i < segments->Length(); i++) {
+      const std::string token = segments->At(i);
+      const size_t tokenPos = text.find(token, byteOffset);
+      if (tokenPos == std::string::npos) {
+        throw opencc::Exception("Jieba token sequence could not be aligned to input text.");
+      }
+      if (tokenPos > byteOffset) {
+        lengths.push_back(CodePointLength(text.substr(byteOffset, tokenPos - byteOffset)));
+      }
+      lengths.push_back(CodePointLength(token));
+      byteOffset = tokenPos + token.size();
+    }
+    if (byteOffset < text.size()) {
+      lengths.push_back(CodePointLength(text.substr(byteOffset)));
+    }
+
+    args->segment_lengths->codepoint_lengths = nullptr;
+    args->segment_lengths->segment_count = lengths.size();
+    args->segment_lengths->codepoint_lengths =
+        new uint32_t[args->segment_lengths->segment_count]();
+    for (size_t i = 0; i < args->segment_lengths->segment_count; i++) {
+      args->segment_lengths->codepoint_lengths[i] = lengths[i];
     }
     return 0;
   } catch (const std::exception& ex) {
-    FreeTokens(args->token_array);
+    FreeSegmentLengths(args->segment_lengths);
     SetError(args->error, OPENCC_ERROR_PLUGIN_RUNTIME_FAILURE, ex.what());
     return -1;
   } catch (...) {
-    FreeTokens(args->token_array);
+    FreeSegmentLengths(args->segment_lengths);
     SetError(args->error, OPENCC_ERROR_PLUGIN_RUNTIME_FAILURE,
              "Unknown error while segmenting text.");
     return -1;
@@ -322,22 +374,22 @@ void FreeError(opencc_error_t* error) {
   error->message = nullptr;
 }
 
-const opencc_segmentation_plugin_v1 kJiebaPlugin = {
-    sizeof(opencc_segmentation_plugin_v1),
+const opencc_segmentation_plugin_v2 kJiebaPlugin = {
+    sizeof(opencc_segmentation_plugin_v2),
     OPENCC_SEGMENTATION_PLUGIN_ABI_MAJOR,
     OPENCC_SEGMENTATION_PLUGIN_ABI_MINOR,
     "opencc-jieba",
     "jieba",
     &CreateJiebaSegmentation,
     &SegmentWithJieba,
-    &FreeTokens,
+    &FreeSegmentLengths,
     &DestroyJiebaSegmentation,
     &FreeError,
 };
 
 } // namespace
 
-extern "C" OPENCC_PLUGIN_EXPORT const opencc_segmentation_plugin_v1*
-opencc_get_segmentation_plugin_v1(void) {
+extern "C" OPENCC_PLUGIN_EXPORT const opencc_segmentation_plugin_v2*
+opencc_get_segmentation_plugin_v2(void) {
   return &kJiebaPlugin;
 }

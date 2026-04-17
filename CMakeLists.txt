@@ -29,7 +29,6 @@ option(BUILD_SHARED_LIBS "Build opencc as shared library" ON)
 option(ENABLE_GTEST "Build all tests." OFF)
 option(ENABLE_BENCHMARK "Build benchmark tests." OFF)
 option(ENABLE_DARTS "Build DartsDict (ocd format)." ON)
-option(ENABLE_JIEBA "Deprecated compatibility option. Use BUILD_OPENCC_JIEBA_PLUGIN." OFF)
 option(BUILD_OPENCC_JIEBA_PLUGIN "Build Jieba segmentation as a loadable plugin." OFF)
 option(BUILD_PYTHON "Build python library" OFF)
 option(USE_SYSTEM_DARTS "Use system version of Darts" OFF)
@@ -118,7 +117,7 @@ endif (DEFINED LIB_INSTALL_DIR)
 
 set (DIR_SHARE_OPENCC ${DIR_SHARE}/opencc)
 if (WIN32)
-  set (DIR_PLUGIN bin/opencc/plugins)
+  set (DIR_PLUGIN bin/plugins)
 else ()
   set (DIR_PLUGIN ${DIR_LIBRARY}/opencc/plugins)
 endif ()
@@ -146,7 +145,7 @@ endif ()
 
 include(CMakePackageConfigHelpers)
 
-set(targets_export_name OpenCCTargets)
+set(OPENCC_TARGETS_EXPORT_NAME OpenCCTargets)
 
 configure_file(
   opencc.pc.in
@@ -171,7 +170,7 @@ configure_package_config_file(
   OpenCCConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/OpenCCConfig.cmake
   INSTALL_DESTINATION ${DIR_LIBRARY}/cmake/opencc
-  PATH_VARS DIR_INCLUDE
+  PATH_VARS DIR_INCLUDE DIR_PLUGIN DIR_SHARE_OPENCC
 )
 
 install(
@@ -241,11 +240,6 @@ if (ENABLE_DARTS)
   )
 endif()
 
-if (ENABLE_JIEBA)
-  message(WARNING "ENABLE_JIEBA is deprecated; enabling BUILD_OPENCC_JIEBA_PLUGIN for compatibility.")
-  set(BUILD_OPENCC_JIEBA_PLUGIN ON)
-endif()
-
 add_definitions(
   -DOPENCC_SEGMENTATION_PLUGIN_DIR="${DIR_PLUGIN_FULL}"
 )
@@ -272,6 +266,22 @@ add_subdirectory(doc)
 add_subdirectory(data)
 add_subdirectory(plugins)
 add_subdirectory(test)
+
+if (ENABLE_BENCHMARK AND TARGET performance AND TARGET opencc_jieba)
+  target_compile_definitions(performance PRIVATE
+    OPENCC_BENCHMARK_JIEBA_CONFIG_DIR="${CMAKE_SOURCE_DIR}/plugins/jieba/data/config"
+    OPENCC_BENCHMARK_JIEBA_PLUGIN_DIR="$<TARGET_FILE_DIR:opencc_jieba>"
+  )
+  add_dependencies(performance opencc_jieba)
+  if (WIN32)
+    add_custom_target(
+      copy_opencc_jieba_to_benchmark
+      ${CMAKE_COMMAND} -E copy $<TARGET_FILE:opencc_jieba> ${PROJECT_BINARY_DIR}/src/benchmark
+      COMMENT "Copying opencc_jieba to src/benchmark"
+    )
+    add_dependencies(performance copy_opencc_jieba_to_benchmark)
+  endif()
+endif()
 
 ######## Testing
 
