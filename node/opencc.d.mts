@@ -7,3 +7,4 @@ declare class OpenCC {
   convertPromise(input: string): Promise<string>;
 }
 export { OpenCC };
+export default OpenCC;

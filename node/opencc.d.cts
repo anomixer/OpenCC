@@ -6,4 +6,9 @@ declare class OpenCC {
   convertSync(input: string): string;
   convertPromise(input: string): Promise<string>;
 }
-export { OpenCC };
+
+declare namespace OpenCC {
+  export { OpenCC };
+}
+
+export = OpenCC;
