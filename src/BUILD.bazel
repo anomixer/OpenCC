@@ -4,6 +4,15 @@ load("@rules_python//python:py_library.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "all_files",
+    srcs = glob([
+        "**/*.cpp",
+        "**/*.h",
+        "**/*.hpp",
+    ]),
+)
+
 cc_library(
     name = "opencc",
     hdrs = ["ConversionInspection.hpp"],
@@ -91,7 +100,7 @@ cc_library(
         ":max_match_segmentation",
         ":plugin_segmentation",
         ":text_dict",
-        "@rapidjson",
+        "//deps/rapidjson-1.1.0:rapidjson",
     ],
 )
 
@@ -456,6 +465,10 @@ cc_library(
 
 cc_library(
     name = "serializable_dict",
+    srcs = [
+        "SerializableDict.cpp",
+        "WinUtil.hpp",
+    ],
     hdrs = ["SerializableDict.hpp"],
     deps = [
         ":dict",
