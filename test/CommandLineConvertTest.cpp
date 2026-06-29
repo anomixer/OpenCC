@@ -144,6 +144,16 @@ protected:
 #endif
   }
 
+#if defined(BAZEL) && defined(OPENCC_ENABLE_RESOURCE_ZIP_TEST)
+  std::string ResourceZipFile() const {
+    return runfiles_->Rlocation("_main/data/opencc-resources.zip");
+  }
+
+  std::string ResourceOcd2ZipFile() const {
+    return runfiles_->Rlocation("_main/data/opencc-resources-ocd2.zip");
+  }
+#endif
+
   std::string ConfigurationDirectory() const {
 #ifdef BAZEL
     return "";
@@ -205,6 +215,22 @@ protected:
     return system(cmd.c_str());
 #endif
   }
+
+#if defined(BAZEL) && defined(OPENCC_ENABLE_RESOURCE_ZIP_TEST)
+  std::string TestResourceZipCommand(const std::string& config,
+                                     const std::string& inputFile,
+                                     const std::string& outputFile) const {
+    std::string cmd = QuotePath(OpenccCommand()) + " -i " +
+                      QuotePath(inputFile) + " -o " + QuotePath(outputFile) +
+                      " -c " + QuotePath(config + ".json") +
+                      " --resource-zip " + QuotePath(ResourceZipFile());
+#ifdef _WIN32
+    return "\"" + cmd + "\"";
+#else
+    return cmd;
+#endif
+  }
+#endif
 
   std::string TestCommandWithFlags(const std::string& config,
                                    const std::string& inputFile,
@@ -397,6 +423,45 @@ TEST_F(CommandLineConvertTest, IncludeTofuRiskDictionariesFlagRestoresLegacy) {
   EXPECT_EQ("𫝈", GetFileContents(outputFile));
 }
 
+#if defined(BAZEL) && defined(OPENCC_ENABLE_RESOURCE_ZIP_TEST)
+TEST_F(CommandLineConvertTest, ResourceZipConvertsWithoutResourcePaths) {
+  const std::string inputFile = InputFile("resource_zip");
+  const std::string outputFile = OutputFile("resource_zip");
+
+  {
+    std::ofstream ofs(inputFile, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "打印机和鼠标";
+  }
+
+  ASSERT_EQ(0,
+            RunCommand(TestResourceZipCommand("s2twp", inputFile, outputFile)));
+  EXPECT_EQ("印表機和滑鼠", GetFileContents(outputFile));
+}
+
+TEST_F(CommandLineConvertTest, ResourceOcd2ZipConvertsWithoutResourcePaths) {
+  const std::string inputFile = InputFile("resource_ocd2_zip");
+  const std::string outputFile = OutputFile("resource_ocd2_zip");
+
+  {
+    std::ofstream ofs(inputFile, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "打印机和鼠标";
+  }
+
+  std::string cmd = QuotePath(OpenccCommand()) + " -i " +
+                    QuotePath(inputFile) + " -o " + QuotePath(outputFile) +
+                    " -c s2twp.json" +
+                    " --resource-zip " + QuotePath(ResourceOcd2ZipFile());
+#ifdef _WIN32
+  cmd = "\"" + cmd + "\"";
+#endif
+
+  ASSERT_EQ(0, RunCommand(cmd));
+  EXPECT_EQ("印表機和滑鼠", GetFileContents(outputFile));
+}
+#endif
+
 TEST_F(CommandLineConvertTest, StdinPreservesLineEndingsAndUnknownCharacters) {
   const std::string config = "s2t";
   const std::string inputFile = InputFile("stdin_line_endings");
@@ -411,6 +476,59 @@ TEST_F(CommandLineConvertTest, StdinPreservesLineEndingsAndUnknownCharacters) {
   ASSERT_EQ(0, system(TestStdinCommand(config, inputFile, outputFile).c_str()));
   EXPECT_EQ("鼠標=mouse\r\n123\n未登錄", GetFileContents(outputFile));
 }
+
+#ifndef _WIN32
+TEST_F(CommandLineConvertTest, WarnsWhenInputContainsVariationSelector) {
+  const std::string inputFile = InputFile("ivs_warning");
+  const std::string outputFile = OutputFile("ivs_warning");
+  const std::string stderrFile = OutputFile("ivs_warning.stderr");
+  const std::string variationSelector = "\xF3\xA0\x84\x80";
+
+  {
+    std::ofstream ofs(inputFile, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "汉禰" << variationSelector;
+  }
+
+  const std::string command =
+      TestCommand("s2t", inputFile, outputFile) + " 2> " +
+      QuotePath(stderrFile);
+  ASSERT_EQ(0, system(command.c_str()));
+  EXPECT_EQ("漢禰" + variationSelector, GetFileContents(outputFile));
+  EXPECT_NE(std::string::npos,
+            GetFileContents(stderrFile).find(
+                "warning: input contains Unicode variation selectors"));
+}
+
+TEST_F(CommandLineConvertTest,
+       WarnsWhenSupplementaryVariationSelectorCrossesChunkBoundary) {
+  const std::string inputFile = InputFile("ivs_warning_chunk_boundary");
+  const std::string outputFile = OutputFile("ivs_warning_chunk_boundary");
+  const std::string stderrFile =
+      OutputFile("ivs_warning_chunk_boundary.stderr");
+
+  std::string input(1048576 - 1, 'a');
+  input.push_back(static_cast<char>(0xF3));
+  input.push_back(static_cast<char>(0xA0));
+  input.push_back(static_cast<char>(0x84));
+  input.push_back(static_cast<char>(0x80));
+
+  {
+    std::ofstream ofs(inputFile, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << input;
+  }
+
+  const std::string command =
+      TestCommand("s2t", inputFile, outputFile) + " 2> " +
+      QuotePath(stderrFile);
+  ASSERT_EQ(0, system(command.c_str()));
+  EXPECT_EQ(input, GetFileContents(outputFile));
+  EXPECT_NE(std::string::npos,
+            GetFileContents(stderrFile).find(
+                "warning: input contains Unicode variation selectors"));
+}
+#endif
 
 #ifndef _WIN32
 TEST_F(CommandLineConvertTest, PipeShortReadContinuesUntilEof) {
@@ -649,7 +767,7 @@ TEST_F(CommandLineConvertTest, WritesMeasuredResultJson) {
 }
 
 TEST_F(CommandLineConvertTest, SegmentationOutputIsJson) {
-  const std::string config = "s2t";
+  const std::string config = "s2twp";
   const std::string inputFile = InputFile("segmentation_test");
   const std::string outputFile = OutputFile("segmentation_test");
 
@@ -737,6 +855,20 @@ TEST_F(CommandLineConvertTest, SegmentationAndInspectAreMutuallyExclusive) {
   EXPECT_NE(0, exitCode);
 }
 
+TEST_F(CommandLineConvertTest, SegmentationFailsWhenConfigHasNoSegmentation) {
+  // s2t has no segmentation step; --segmentation should exit non-zero.
+  const std::string config = "s2t";
+  const std::string inputFile = InputFile("seg_no_seg_test");
+  const std::string outputFile = OutputFile("seg_no_seg_test");
+  {
+    std::ofstream ofs(inputFile, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "开放中文转换\n";
+  }
+  EXPECT_NE(0, system(TestCommandWithFlags(config, inputFile, outputFile,
+                                           "--segmentation").c_str()));
+}
+
 TEST_F(CommandLineConvertTest, MeasuredResultIncludesOutputMode) {
   const std::string config = "s2t";
   const std::string inputFile = InputFile("inspect_measured_test");
@@ -773,7 +905,7 @@ TEST_F(CommandLineConvertTest, MeasuredResultIncludesOutputMode) {
 // tokens; none of those tokens should already be Traditional Chinese unless
 // the conversion chain ran.
 TEST_F(CommandLineConvertTest, SegmentationDoesNotRunConversionChain) {
-  const std::string config = "s2t";
+  const std::string config = "s2twp";
   const std::string inputFile = InputFile("seg_no_convert_test");
   const std::string outputFile = OutputFile("seg_no_convert_test");
 
@@ -817,7 +949,7 @@ TEST_F(CommandLineConvertTest, SegmentationDoesNotRunConversionChain) {
 // Verify that a multi-line input in --segmentation mode produces exactly one
 // JSON object per input line with no spurious extra record at EOF.
 TEST_F(CommandLineConvertTest, SegmentationNoSpuriousEofRecord) {
-  const std::string config = "s2t";
+  const std::string config = "s2twp";
   const std::string inputFile = InputFile("seg_eof_test");
   const std::string outputFile = OutputFile("seg_eof_test");
 

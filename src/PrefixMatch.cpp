@@ -18,12 +18,15 @@
 
 #include "PrefixMatch.hpp"
 #include "Dict.hpp"
+#include "DictGroup.hpp"
 #include "Lexicon.hpp"
 #include "UTF8Util.hpp"
 
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 using namespace opencc;
 
@@ -49,7 +52,8 @@ uint32_t Utf8CharKey(const char* str, size_t charLen) {
 
 class PrefixMatch::Tables {
 public:
-  std::unique_ptr<Table> table;
+  class Matcher;
+  std::unique_ptr<Matcher> matcher;
 };
 
 namespace {
@@ -111,22 +115,58 @@ void PruneExpiredPrefixMatchCache(
   }
 }
 
+void Unreachable() {
+#if defined(_MSC_VER)
+  __assume(false);
+#elif defined(__GNUC__) || defined(__clang__)
+  __builtin_unreachable();
+#endif
+}
+
 } // namespace
 
-class PrefixMatch::Table {
+class PrefixMatch::Tables::Matcher {
 public:
-  Table() {}
+  struct Candidate {
+    bool hasValue = false;
+    size_t keyLength = 0;
+    const std::string* key = nullptr;
+    const std::string* value = nullptr;
+  };
 
-  void AddDict(const DictPtr& dict, size_t dictOrder) {
+  virtual ~Matcher() {}
+
+  virtual Candidate MatchPrefixCandidate(const char* word,
+                                         size_t len) const = 0;
+};
+
+class LeafMatcher : public PrefixMatch::Tables::Matcher {
+private:
+  struct StoredCandidate {
+    bool hasValue = false;
+    size_t keyLength = 0;
+    std::string key;
+    std::string value;
+  };
+
+  struct Node {
+    StoredCandidate candidate;
+    std::unordered_map<uint32_t, std::unique_ptr<Node>> children;
+  };
+
+public:
+  LeafMatcher() {}
+
+  void AddDict(const DictPtr& dict) {
     const LexiconPtr lexicon = dict->GetLexicon();
     for (const std::unique_ptr<DictEntry>& item : *lexicon) {
-      AddEntry(item->Key(), item->GetDefault(), dictOrder);
+      AddEntry(item->Key(), item->GetDefault());
     }
   }
 
-  PrefixMatch::Match MatchPrefix(const char* word, size_t len) const {
+  Candidate MatchPrefixCandidate(const char* word, size_t len) const override {
     const Node* node = &root;
-    const Candidate* matchedCandidate = nullptr;
+    const StoredCandidate* matchedCandidate = nullptr;
     for (const char* pstr = word; pstr < word + len;) {
       const size_t remainingLength = word + len - pstr;
       const size_t charLength = Utf8CharLength(pstr, remainingLength);
@@ -141,35 +181,19 @@ public:
       node = child->second.get();
       if (node->candidate.hasValue &&
           (matchedCandidate == nullptr ||
-           node->candidate.dictOrder < matchedCandidate->dictOrder ||
-           (node->candidate.dictOrder == matchedCandidate->dictOrder &&
-            node->candidate.keyLength > matchedCandidate->keyLength))) {
+           node->candidate.keyLength > matchedCandidate->keyLength)) {
         matchedCandidate = &node->candidate;
       }
     }
-    if (matchedCandidate != nullptr) {
-      return Match{true, matchedCandidate->keyLength, &matchedCandidate->key,
-                   &matchedCandidate->value};
+    if (matchedCandidate == nullptr) {
+      return Candidate{};
     }
-    return Match{false, 0, nullptr, nullptr};
+    return Candidate{true, matchedCandidate->keyLength,
+                     &matchedCandidate->key, &matchedCandidate->value};
   }
 
 private:
-  struct Candidate {
-    bool hasValue = false;
-    size_t dictOrder = 0;
-    size_t keyLength = 0;
-    std::string key;
-    std::string value;
-  };
-
-  struct Node {
-    Candidate candidate;
-    std::unordered_map<uint32_t, std::unique_ptr<Node>> children;
-  };
-
-  void AddEntry(const std::string& key, const std::string& value,
-                size_t dictOrder) {
+  void AddEntry(const std::string& key, const std::string& value) {
     Node* node = &root;
     for (const char* pstr = key.c_str(); *pstr != '\0';) {
       const size_t remainingLength = key.c_str() + key.length() - pstr;
@@ -185,9 +209,8 @@ private:
       node = child.get();
       pstr += charLength;
     }
-    if (!node->candidate.hasValue || dictOrder < node->candidate.dictOrder) {
+    if (!node->candidate.hasValue) {
       node->candidate.hasValue = true;
-      node->candidate.dictOrder = dictOrder;
       node->candidate.keyLength = key.length();
       node->candidate.key = key;
       node->candidate.value = value;
@@ -197,7 +220,87 @@ private:
   Node root;
 };
 
+class GroupMatcher : public PrefixMatch::Tables::Matcher {
+public:
+  explicit GroupMatcher(DictGroupMatchPolicy _matchPolicy)
+      : matchPolicy(_matchPolicy) {}
+
+  void AddChild(std::unique_ptr<Matcher> child) {
+    children.push_back(std::move(child));
+  }
+
+  Candidate MatchPrefixCandidate(const char* word, size_t len) const override {
+    switch (matchPolicy) {
+    case DictGroupMatchPolicy::ShortCircuit:
+      return MatchPrefixShortCircuit(word, len);
+    case DictGroupMatchPolicy::Union:
+      return MatchPrefixUnion(word, len);
+    }
+    Unreachable();
+    return Candidate{};
+  }
+
+private:
+  Candidate MatchPrefixShortCircuit(const char* word, size_t len) const {
+    for (const std::unique_ptr<Matcher>& child : children) {
+      const Candidate candidate = child->MatchPrefixCandidate(word, len);
+      if (candidate.hasValue) {
+        return candidate;
+      }
+    }
+    return Candidate{};
+  }
+
+  Candidate MatchPrefixUnion(const char* word, size_t len) const {
+    Candidate best;
+    for (const std::unique_ptr<Matcher>& child : children) {
+      const Candidate candidate = child->MatchPrefixCandidate(word, len);
+      if (candidate.hasValue &&
+          (!best.hasValue || candidate.keyLength > best.keyLength)) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  std::vector<std::unique_ptr<Matcher>> children;
+  const DictGroupMatchPolicy matchPolicy;
+};
+
+std::unique_ptr<PrefixMatch::Tables::Matcher> BuildMatcher(
+    const DictPtr& dict) {
+  const std::list<DictPtr>* dictGroupItems = dict->GetDictGroupItems();
+  if (dictGroupItems != nullptr) {
+    std::unique_ptr<GroupMatcher> group(
+        new GroupMatcher(dict->GetMatchPolicy()));
+    for (const DictPtr& child : *dictGroupItems) {
+      group->AddChild(BuildMatcher(child));
+    }
+    return std::move(group);
+  }
+
+  std::unique_ptr<LeafMatcher> leaf(new LeafMatcher);
+  leaf->AddDict(dict);
+  return std::move(leaf);
+}
+
 PrefixMatch::PrefixMatch(const DictPtr& dict) {
+  // Try to unwrap single dict group
+  DictPtr actualDict = dict;
+  while (actualDict) {
+    const std::list<DictPtr>* items = actualDict->GetDictGroupItems();
+    if (items != nullptr && items->size() == 1) {
+      actualDict = items->front();
+    } else {
+      break;
+    }
+  }
+
+  if (actualDict && actualDict->SupportsFastPrefixMatch()) {
+    singleDict = actualDict;
+    return;
+  }
+
   static std::mutex cacheMutex;
   static std::unordered_map<std::string, std::vector<CacheEntry>> cache;
 
@@ -223,9 +326,7 @@ PrefixMatch::PrefixMatch(const DictPtr& dict) {
   }
 
   std::shared_ptr<Tables> built(new Tables);
-  built->table.reset(new Table);
-  size_t dictOrder = 0;
-  AddDict(dict, built.get(), &dictOrder);
+  built->matcher = BuildMatcher(dict);
 
   std::lock_guard<std::mutex> lock(cacheMutex);
   PruneExpiredPrefixMatchCache(&cache);
@@ -255,26 +356,59 @@ PrefixMatch::~PrefixMatch() {}
 
 PrefixMatch::Match PrefixMatch::MatchPrefix(const char* word,
                                             size_t len) const {
-  return tables->table->MatchPrefix(word, len);
+  if (singleDict != nullptr) {
+    struct MatchCache {
+      std::string key;
+      std::string value;
+    };
+    // key/value pointers are valid until the next MatchPrefix() call on this
+    // thread.
+    static thread_local MatchCache matchCache;
+    const PrefixMatchView pv = singleDict->MatchPrefixValue(word, len);
+    if (pv.matched) {
+      matchCache.key = std::string(pv.key);
+      matchCache.value = std::string(pv.value);
+      return Match{true, pv.keyLength, &matchCache.key, &matchCache.value};
+    }
+    return Match{false, 0, nullptr, nullptr};
+  }
+
+  const Tables::Matcher::Candidate candidate =
+      tables->matcher->MatchPrefixCandidate(word, len);
+  if (candidate.hasValue) {
+    return Match{true, candidate.keyLength, candidate.key, candidate.value};
+  }
+  return Match{false, 0, nullptr, nullptr};
 }
 
-void PrefixMatch::AddDict(const DictPtr& dict, Tables* output,
-                          size_t* dictOrder) {
-  const std::list<DictPtr>* dictGroupItems = dict->GetDictGroupItems();
-  if (dictGroupItems != nullptr) {
-    for (const DictPtr& child : *dictGroupItems) {
-      AddDict(child, output, dictOrder);
-    }
-    return;
+PrefixMatchView PrefixMatch::MatchPrefixView(const char* word,
+                                              size_t len) const {
+  if (singleDict != nullptr) {
+    return singleDict->MatchPrefixValue(word, len);
   }
-  output->table->AddDict(dict, *dictOrder);
-  ++(*dictOrder);
+  const Tables::Matcher::Candidate candidate =
+      tables->matcher->MatchPrefixCandidate(word, len);
+  if (candidate.hasValue) {
+    return {true, candidate.keyLength,
+            std::string_view(*candidate.key),
+            std::string_view(*candidate.value)};
+  }
+  return {false, 0, std::string_view(), std::string_view()};
 }
 
 void PrefixMatch::AppendCacheKey(const DictPtr& dict, std::string* output) {
   const std::list<DictPtr>* dictGroupItems = dict->GetDictGroupItems();
   if (dictGroupItems != nullptr) {
     output->push_back('[');
+    const DictGroupMatchPolicy matchPolicy = dict->GetMatchPolicy();
+    switch (matchPolicy) {
+    case DictGroupMatchPolicy::ShortCircuit:
+      output->append("short_circuit:");
+      break;
+    case DictGroupMatchPolicy::Union:
+      output->append("union:");
+      break;
+    }
     for (const DictPtr& child : *dictGroupItems) {
       AppendCacheKey(child, output);
     }

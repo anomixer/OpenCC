@@ -6,7 +6,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 def get_opencc_version() -> str:
     try:
@@ -73,25 +73,72 @@ def load_dict(name: str, dict_dir: Path) -> Dict[str, List[str]]:
             
     raise FileNotFoundError(f"Dictionary file not found for: {name} in {dict_dir}")
 
-def resolve_and_merge_dict(dict_def: Dict[str, Any], dict_dir: Path) -> Dict[str, str]:
-    if dict_def["type"] == "group":
-        merged_entries: Dict[str, str] = {}
-        for sub_def in dict_def["dicts"]:
-            sub_entries = resolve_and_merge_dict(sub_def, dict_dir)
-            for key, val in sub_entries.items():
-                if key not in merged_entries:
-                    merged_entries[key] = val
-        return merged_entries
+def inline_entries_for_file_dict(dict_def: Dict[str, Any], dict_dir: Path) -> Dict[str, str]:
+    file_name = dict_def["file"]
+    base_name = Path(file_name).stem
+    raw_dict = load_dict(base_name, dict_dir)
+    return {k: v[0] for k, v in raw_dict.items()}
+
+def is_union_mergeable(compiled: Dict[str, Any]) -> bool:
+    """Return True if compiled can be fully flattened into a single inline dict.
+
+    A dict is mergeable if it is inline, or if it is a union group whose every
+    child is recursively mergeable.  Short-circuit and other group policies are
+    not mergeable because child order affects which match wins.
+    """
+    if compiled["type"] == "inline":
+        return True
+    if compiled["type"] == "group" and compiled.get("match_policy") == "union":
+        return all(is_union_mergeable(child) for child in compiled["dicts"])
+    return False
+
+
+def collect_union_entries(compiled: Dict[str, Any], merged: Dict[str, str]) -> None:
+    """Recursively collect entries from a mergeable dict into merged.
+
+    Only call after is_union_mergeable() has confirmed the whole subtree is
+    mergeable.  First-occurrence wins for duplicate keys.
+    """
+    if compiled["type"] == "inline":
+        for k, v in compiled["entries"].items():
+            if k not in merged:
+                merged[k] = v
     else:
-        # It's a file dictionary (type: text, ocd, ocd2, or inline)
-        if dict_def["type"] == "inline":
-            return dict_def["entries"]
-        else:
-            # File dict
-            file_name = dict_def["file"]
-            base_name = Path(file_name).stem
-            raw_dict = load_dict(base_name, dict_dir)
-            return {k: v[0] for k, v in raw_dict.items()}
+        for child in compiled["dicts"]:
+            collect_union_entries(child, merged)
+
+
+def compile_dict(dict_def: Dict[str, Any], dict_dir: Path) -> Dict[str, Any]:
+    if dict_def["type"] == "group":
+        compiled_children = [compile_dict(sub_def, dict_dir) for sub_def in dict_def["dicts"]]
+        match_policy = dict_def.get("match_policy", "short_circuit")
+
+        if match_policy == "union":
+            # Union semantics: longest prefix wins regardless of child order.
+            # A flat merged inline dict has the same semantics because LeafMatcher
+            # always returns the longest match; first-occurrence wins for same key.
+            # Nested union groups are also absorbed since union(union(...)) = union(...).
+            if all(is_union_mergeable(child) for child in compiled_children):
+                merged: Dict[str, str] = {}
+                for child in compiled_children:
+                    collect_union_entries(child, merged)
+                return {"type": "inline", "entries": sort_dict_keys(merged)}
+
+        result: Dict[str, Any] = {"type": "group"}
+        if "match_policy" in dict_def:
+            result["match_policy"] = dict_def["match_policy"]
+        result["dicts"] = compiled_children
+        return result
+
+    if dict_def["type"] == "inline":
+        entries = dict_def["entries"]
+    else:
+        entries = inline_entries_for_file_dict(dict_def, dict_dir)
+
+    return {
+        "type": "inline",
+        "entries": sort_dict_keys(entries),
+    }
 
 def sort_dict_keys(d: Dict[str, str]) -> Dict[str, str]:
     return {k: d[k] for k in sorted(d.keys())}
@@ -105,22 +152,14 @@ def compile_config(config_path: Path, dict_dir: Path) -> Dict[str, Any]:
     # Process segmentation dict if present
     if "segmentation" in config_data and "dict" in config_data["segmentation"]:
         dict_def = config_data["segmentation"]["dict"]
-        merged_entries = resolve_and_merge_dict(dict_def, dict_dir)
-        config_data["segmentation"]["dict"] = {
-            "type": "inline",
-            "entries": sort_dict_keys(merged_entries)
-        }
+        config_data["segmentation"]["dict"] = compile_dict(dict_def, dict_dir)
         
     # Process conversion chain dicts
     if "conversion_chain" in config_data:
         for stage in config_data["conversion_chain"]:
             if "dict" in stage:
                 dict_def = stage["dict"]
-                merged_entries = resolve_and_merge_dict(dict_def, dict_dir)
-                stage["dict"] = {
-                    "type": "inline",
-                    "entries": sort_dict_keys(merged_entries)
-                }
+                stage["dict"] = compile_dict(dict_def, dict_dir)
                 
     return config_data
 
@@ -169,4 +208,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

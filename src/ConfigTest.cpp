@@ -19,6 +19,8 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -41,6 +43,15 @@ namespace fs = std::filesystem;
 
 std::string PathString(const fs::path& path) { return path.u8string(); }
 
+std::string NormalizePathString(std::string path) {
+  for (char& ch : path) {
+    if (ch == '\\') {
+      ch = '/';
+    }
+  }
+  return path;
+}
+
 fs::path MakeTempDir(const std::string& name) {
 #if defined(_WIN32) || defined(_WIN64)
   const auto suffix = std::to_string(GetCurrentProcessId());
@@ -56,6 +67,85 @@ fs::path MakeTempDir(const std::string& name) {
 void WriteFile(const fs::path& path, const std::string& content) {
   std::ofstream ofs(path, std::ios::binary);
   ofs << content;
+}
+
+void WriteLe16(std::ofstream& output, uint16_t value) {
+  output.put(static_cast<char>(value & 0xff));
+  output.put(static_cast<char>((value >> 8) & 0xff));
+}
+
+void WriteLe32(std::ofstream& output, uint32_t value) {
+  output.put(static_cast<char>(value & 0xff));
+  output.put(static_cast<char>((value >> 8) & 0xff));
+  output.put(static_cast<char>((value >> 16) & 0xff));
+  output.put(static_cast<char>((value >> 24) & 0xff));
+}
+
+struct ZipTestEntry {
+  std::string name;
+  std::string content;
+  uint32_t localHeaderOffset;
+};
+
+void WriteStoredZip(const fs::path& path,
+                    std::vector<std::pair<std::string, std::string>> entries) {
+  std::ofstream output(path, std::ios::binary);
+  std::vector<ZipTestEntry> writtenEntries;
+  for (const auto& entry : entries) {
+    const std::string& name = entry.first;
+    const std::string& content = entry.second;
+    const uint32_t localHeaderOffset =
+        static_cast<uint32_t>(output.tellp());
+    WriteLe32(output, 0x04034b50);
+    WriteLe16(output, 20);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe32(output, 0);
+    WriteLe32(output, static_cast<uint32_t>(content.size()));
+    WriteLe32(output, static_cast<uint32_t>(content.size()));
+    WriteLe16(output, static_cast<uint16_t>(name.size()));
+    WriteLe16(output, 0);
+    output.write(name.data(), static_cast<std::streamsize>(name.size()));
+    output.write(content.data(), static_cast<std::streamsize>(content.size()));
+    writtenEntries.push_back(ZipTestEntry{name, content, localHeaderOffset});
+  }
+
+  const uint32_t centralDirectoryOffset =
+      static_cast<uint32_t>(output.tellp());
+  for (const ZipTestEntry& entry : writtenEntries) {
+    WriteLe32(output, 0x02014b50);
+    WriteLe16(output, 20);
+    WriteLe16(output, 20);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe32(output, 0);
+    WriteLe32(output, static_cast<uint32_t>(entry.content.size()));
+    WriteLe32(output, static_cast<uint32_t>(entry.content.size()));
+    WriteLe16(output, static_cast<uint16_t>(entry.name.size()));
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe16(output, 0);
+    WriteLe32(output, 0);
+    WriteLe32(output, entry.localHeaderOffset);
+    output.write(entry.name.data(),
+                 static_cast<std::streamsize>(entry.name.size()));
+  }
+  const uint32_t centralDirectorySize =
+      static_cast<uint32_t>(output.tellp()) - centralDirectoryOffset;
+
+  WriteLe32(output, 0x06054b50);
+  WriteLe16(output, 0);
+  WriteLe16(output, 0);
+  WriteLe16(output, static_cast<uint16_t>(writtenEntries.size()));
+  WriteLe16(output, static_cast<uint16_t>(writtenEntries.size()));
+  WriteLe32(output, centralDirectorySize);
+  WriteLe32(output, centralDirectoryOffset);
+  WriteLe16(output, 0);
 }
 
 std::string SingleDictConfig(const std::string& dictFile) {
@@ -140,15 +230,14 @@ protected:
 };
 
 TEST_F(ConfigTest, Convert) {
-  const std::string& converted = converter->Convert(input);
+  const std::string converted = converter->Convert(std::string_view(input));
   EXPECT_EQ(expected, converted);
 }
 
-TEST_F(ConfigTest, ConvertBuffer) {
-  char output[1024];
-  const size_t length = converter->Convert(input.c_str(), output);
-  EXPECT_EQ(expected.length(), length);
-  EXPECT_EQ(expected, output);
+TEST_F(ConfigTest, ConvertLength) {
+  const std::string result = converter->Convert(std::string_view(input));
+  EXPECT_EQ(expected.length(), result.length());
+  EXPECT_EQ(expected, result);
 }
 
 TEST_F(ConfigTest, NonexistingPath) {
@@ -180,7 +269,7 @@ TEST_F(ConfigTest, DefaultConfigPathFindsAdjacentResources) {
   try {
     const ConverterPtr tempConverter =
         config.NewFromFile(PathString(tempDir / "config_test.json"));
-    EXPECT_EQ(expected, tempConverter->Convert(input));
+    EXPECT_EQ(expected, tempConverter->Convert(std::string_view(input)));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -202,7 +291,8 @@ TEST_F(ConfigTest, ExplicitProviderFindsResources) {
         new FilesystemResourceProvider({PathString(resourceDir)}));
     const ConverterPtr tempConverter =
         config.NewFromFile(PathString(configDir / "config.json"), provider);
-    EXPECT_EQ(utf8("滑鼠"), tempConverter->Convert(utf8("鼠标")));
+    EXPECT_EQ(utf8("滑鼠"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -222,7 +312,73 @@ TEST_F(ConfigTest, ExplicitProviderFindsConfigNameAndResources) {
         new FilesystemResourceProvider({PathString(resourceDir)}));
     const ConverterPtr tempConverter =
         config.NewFromFile("provider_config.json", provider);
-    EXPECT_EQ(utf8("滑鼠"), tempConverter->Convert(utf8("鼠标")));
+    EXPECT_EQ(utf8("滑鼠"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
+  } catch (...) {
+    fs::remove_all(tempDir);
+    throw;
+  }
+  fs::remove_all(tempDir);
+}
+
+TEST_F(ConfigTest, ZipProviderFindsConfigNameAndResources) {
+  const fs::path tempDir = MakeTempDir("opencc-zip-provider-test");
+  const fs::path zipPath = tempDir / "resources.zip";
+  WriteStoredZip(zipPath, {
+                              {"config.json", SingleDictConfig("dict.txt")},
+                              {"dict.txt", utf8("鼠标\t滑鼠\n")},
+                          });
+
+  try {
+    std::shared_ptr<ResourceProvider> provider(
+        new ZipResourceProvider(PathString(zipPath)));
+    const ConverterPtr tempConverter =
+        config.NewFromFile("config.json", provider);
+    EXPECT_EQ(utf8("滑鼠"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
+  } catch (...) {
+    fs::remove_all(tempDir);
+    throw;
+  }
+  fs::remove_all(tempDir);
+}
+
+TEST_F(ConfigTest, ZipProviderDoesNotOverrideAbsoluteConfigPath) {
+  const fs::path tempDir = MakeTempDir("opencc-zip-absolute-config-test");
+  const fs::path zipPath = tempDir / "resources.zip";
+  const fs::path configPath = tempDir / "config.json";
+  WriteStoredZip(zipPath, {
+                              {"config.json",
+                               InlineSingleStepConfig(
+                                   "{\n"
+                                   "        \"鼠标\": \"鼠标\"\n"
+                                   "      }",
+                                   "{\n"
+                                   "      \"type\": \"inline\",\n"
+                                   "      \"entries\": {\n"
+                                   "        \"鼠标\": \"乙\"\n"
+                                   "      }\n"
+                                   "    }")},
+                          });
+  WriteFile(configPath,
+            InlineSingleStepConfig(
+                "{\n"
+                "        \"鼠标\": \"鼠标\"\n"
+                "      }",
+                "{\n"
+                "      \"type\": \"inline\",\n"
+                "      \"entries\": {\n"
+                "        \"鼠标\": \"甲\"\n"
+                "      }\n"
+                "    }"));
+
+  try {
+    std::shared_ptr<ResourceProvider> provider(
+        new ZipResourceProvider(PathString(zipPath)));
+    const ConverterPtr tempConverter =
+        config.NewFromFile(PathString(configPath), provider);
+    EXPECT_EQ(utf8("甲"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -248,7 +404,8 @@ TEST_F(ConfigTest, ExplicitProviderConfigOverridesInstalledOrCwdConfigName) {
         new FilesystemResourceProvider({PathString(resourceDir)}));
     const ConverterPtr tempConverter =
         config.NewFromFile("config.json", provider);
-    EXPECT_EQ(utf8("乙"), tempConverter->Convert(utf8("鼠标")));
+    EXPECT_EQ(utf8("乙"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
     fs::current_path(originalCwd);
   } catch (...) {
     fs::current_path(originalCwd);
@@ -271,7 +428,8 @@ TEST_F(ConfigTest, RelativeParentDictionaryPathStillWorks) {
   try {
     const ConverterPtr tempConverter =
         config.NewFromFile(PathString(configDir / "config.json"));
-    EXPECT_EQ(utf8("滑鼠"), tempConverter->Convert(utf8("鼠标")));
+    EXPECT_EQ(utf8("滑鼠"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -297,7 +455,8 @@ TEST_F(ConfigTest, MultipleSearchPathsUseFirstMatch) {
             {PathString(firstDir), PathString(secondDir)}));
     const ConverterPtr tempConverter =
         config.NewFromFile(PathString(configDir / "config.json"), provider);
-    EXPECT_EQ(utf8("第一"), tempConverter->Convert(utf8("鼠标")));
+    EXPECT_EQ(utf8("第一"),
+              tempConverter->Convert(std::string_view(utf8("鼠标"))));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -326,6 +485,29 @@ TEST_F(ConfigTest, MissingResourceListsSearchedPaths) {
   fs::remove_all(tempDir);
 }
 
+TEST_F(ConfigTest, FilesystemResourceCacheKeyIncludesFreshness) {
+  const fs::path tempDir = MakeTempDir("opencc-resource-cache-key-test");
+  const fs::path resourceDir = tempDir / "resources";
+  fs::create_directories(resourceDir);
+  const fs::path dictPath = resourceDir / "dict.txt";
+  WriteFile(dictPath, utf8("鼠标\t滑鼠\n"));
+
+  try {
+    FilesystemResourceProvider provider({PathString(resourceDir)});
+    const std::shared_ptr<const ResourceProvider::Resource> resource =
+        provider.GetResource("dict.txt");
+    EXPECT_EQ(NormalizePathString(PathString(dictPath)),
+              NormalizePathString(resource->Name()));
+    const std::string oldKey =
+        resource->Name() + "\n" + std::to_string(resource->Size());
+    EXPECT_NE(oldKey, resource->CacheKey());
+  } catch (...) {
+    fs::remove_all(tempDir);
+    throw;
+  }
+  fs::remove_all(tempDir);
+}
+
 TEST_F(ConfigTest, PluginLikeResourcePathSupplementsMainPath) {
   const fs::path tempDir = MakeTempDir("opencc-plugin-resource-test");
   const fs::path configDir = tempDir / "config";
@@ -343,7 +525,8 @@ TEST_F(ConfigTest, PluginLikeResourcePathSupplementsMainPath) {
             {PathString(mainDir), PathString(pluginDir)}));
     const ConverterPtr tempConverter =
         config.NewFromFile(PathString(configDir / "config.json"), provider);
-    EXPECT_EQ(utf8("伺服器"), tempConverter->Convert(utf8("服务器")));
+    EXPECT_EQ(utf8("伺服器"),
+              tempConverter->Convert(std::string_view(utf8("服务器"))));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -365,7 +548,7 @@ TEST_F(ConfigTest, InlineDictBasicConversion) {
 
   const ConverterPtr inlineConverter = config.NewFromString(json, "");
   EXPECT_EQ(utf8("我想吃冰炫風"),
-            inlineConverter->Convert(utf8("我想吃麦旋风")));
+            inlineConverter->Convert(std::string_view(utf8("我想吃麦旋风"))));
 }
 
 TEST_F(ConfigTest, InlineDictInGroupTakesPriorityOverFollowingFileDict) {
@@ -394,7 +577,48 @@ TEST_F(ConfigTest, InlineDictInGroupTakesPriorityOverFollowingFileDict) {
 
   const ConverterPtr inlineConverter =
       config.NewFromString(json, {CONFIG_TEST_DIR_PATH + "/"});
-  EXPECT_EQ(utf8("自訂覆寫"), inlineConverter->Convert(utf8("燕燕于飞")));
+  EXPECT_EQ(utf8("自訂覆寫"),
+            inlineConverter->Convert(std::string_view(utf8("燕燕于飞"))));
+}
+
+TEST_F(ConfigTest, UnionDictGroupPrefersLaterLongerMatch) {
+  const std::string json =
+      std::string("{\n"
+                  "  \"name\": \"Union Group Test\",\n"
+                  "  \"segmentation\": {\n"
+                  "    \"type\": \"mmseg\",\n"
+                  "    \"dict\": {\n"
+                  "      \"type\": \"inline\",\n"
+                  "      \"entries\": {\n"
+                  "        \"意大利面\": \"意大利面\"\n"
+                  "      }\n"
+                  "    }\n"
+                  "  },\n"
+                  "  \"conversion_chain\": [{\n"
+                  "    \"dict\": {\n"
+                  "      \"type\": \"group\",\n"
+                  "      \"match_policy\": \"union\",\n"
+                  "      \"dicts\": [\n"
+                  "        {\n"
+                  "          \"type\": \"inline\",\n"
+                  "          \"entries\": {\n"
+                  "            \"意大利\": \"義大利\"\n"
+                  "          }\n"
+                  "        },\n"
+                  "        {\n"
+                  "          \"type\": \"inline\",\n"
+                  "          \"entries\": {\n"
+                  "            \"意大利面\": \"義大利麵\"\n"
+                  "          }\n"
+                  "        }\n"
+                  "      ]\n"
+                  "    }\n"
+                  "  }]\n"
+                  "}\n");
+
+  const ConverterPtr inlineConverter = config.NewFromString(json, "");
+  EXPECT_EQ(utf8("義大利麵"),
+            inlineConverter->Convert(std::string_view(utf8("意大利面"))));
 }
 
 TEST_F(ConfigTest, InlineDictOutputStillProcessedByLaterChainStep) {
@@ -432,7 +656,7 @@ TEST_F(ConfigTest, InlineDictOutputStillProcessedByLaterChainStep) {
                   "}\n");
 
   const ConverterPtr inlineConverter = config.NewFromString(json, "");
-  EXPECT_EQ("C", inlineConverter->Convert("A"));
+  EXPECT_EQ("C", inlineConverter->Convert(std::string_view("A")));
 }
 
 TEST_F(ConfigTest, InlineSegmentationDictUsesLongestMatch) {
@@ -464,7 +688,7 @@ TEST_F(ConfigTest, InlineSegmentationDictUsesLongestMatch) {
                   "}\n");
 
   const ConverterPtr inlineConverter = config.NewFromString(json, "");
-  EXPECT_EQ("XD", inlineConverter->Convert("ABCD"));
+  EXPECT_EQ("XD", inlineConverter->Convert(std::string_view("ABCD")));
 }
 
 TEST_F(ConfigTest, InlineDictPreservesExactStringSemantics) {
@@ -481,8 +705,8 @@ TEST_F(ConfigTest, InlineDictPreservesExactStringSemantics) {
       "    }");
 
   const ConverterPtr inlineConverter = config.NewFromString(json, "");
-  EXPECT_EQ("A", inlineConverter->Convert("A"));
-  EXPECT_EQ("B", inlineConverter->Convert(" A "));
+  EXPECT_EQ("A", inlineConverter->Convert(std::string_view("A")));
+  EXPECT_EQ("B", inlineConverter->Convert(std::string_view(" A ")));
 }
 
 TEST_F(ConfigTest, InlineDictValidationErrors) {
@@ -651,7 +875,8 @@ TEST_F(ConfigTest, InlineDictSupportsJsoncCommentsAndTrailingComma) {
                   "}\n");
 
   const ConverterPtr inlineConverter = config.NewFromString(json, "");
-  EXPECT_EQ(utf8("冰炫風"), inlineConverter->Convert(utf8("麦旋风")));
+  EXPECT_EQ(utf8("冰炫風"),
+            inlineConverter->Convert(std::string_view(utf8("麦旋风"))));
 }
 
 TEST_F(ConfigTest, InlineSegmentationAndConversionWorksWithOcd2GroupDicts) {
@@ -698,8 +923,10 @@ TEST_F(ConfigTest, InlineSegmentationAndConversionWorksWithOcd2GroupDicts) {
                   "}\n");
 
   const ConverterPtr inlineConverter = config.NewFromString(json, {ocd2Dir});
-  EXPECT_EQ(utf8("臺灣"), inlineConverter->Convert(utf8("台湾")));
-  EXPECT_EQ(utf8("台灣"), inlineConverter->Convert(utf8("台灣")));
+  EXPECT_EQ(utf8("臺灣"),
+            inlineConverter->Convert(std::string_view(utf8("台湾"))));
+  EXPECT_EQ(utf8("台灣"),
+            inlineConverter->Convert(std::string_view(utf8("台灣"))));
 }
 
 #if defined(_MSC_VER)
@@ -729,7 +956,7 @@ TEST_F(ConfigTest, LoadConfigFromUnicodePath) {
   try {
     const ConverterPtr unicodeConverter =
         config.NewFromFile(tempDir.u8string() + "/config_test.json");
-    EXPECT_EQ(expected, unicodeConverter->Convert(input));
+    EXPECT_EQ(expected, unicodeConverter->Convert(std::string_view(input)));
   } catch (...) {
     fs::remove_all(tempDir);
     throw;
@@ -738,5 +965,40 @@ TEST_F(ConfigTest, LoadConfigFromUnicodePath) {
   fs::remove_all(tempDir);
 }
 #endif
+
+// ── Normalization tests ──────────────────────────────────────────────────────
+
+TEST_F(ConfigTest, NormalizationRunsBeforeSegmentationAndConversion) {
+  // normalization: 甲 → 乙   main conversion: 乙 → 丙
+  // Without normalization the main dict would not match 甲.
+  const std::string config = R"({
+    "name": "Normalization Test",
+    "normalization": [{"dict": {"type": "inline", "entries": {"甲": "乙"}}}],
+    "conversion_chain": [{"dict": {"type": "inline", "entries": {"乙": "丙"}}}]
+  })";
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, CONFIG_TEST_DIR_PATH);
+  EXPECT_EQ(utf8("丙"), conv->Convert(utf8("甲")));
+}
+
+TEST_F(ConfigTest, AbsentNormalizationPreservesOriginalBehavior) {
+  const std::string config = R"({
+    "name": "No Normalization Test",
+    "conversion_chain": [{"dict": {"type": "inline", "entries": {"甲": "丙"}}}]
+  })";
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, CONFIG_TEST_DIR_PATH);
+  EXPECT_EQ(utf8("丙"), conv->Convert(utf8("甲")));
+}
+
+TEST_F(ConfigTest, NormalizationMissingFileDictThrows) {
+  const std::string config = R"({
+    "name": "Bad Normalization",
+    "normalization": [{"dict": {"type": "ocd2", "file": "nonexistent.ocd2"}}],
+    "conversion_chain": [{"dict": {"type": "inline", "entries": {"甲": "丙"}}}]
+  })";
+  Config c;
+  EXPECT_THROW(c.NewFromString(config, CONFIG_TEST_DIR_PATH), Exception);
+}
 
 } // namespace opencc

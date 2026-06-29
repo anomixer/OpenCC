@@ -24,11 +24,11 @@ jobs:
         # LTS coverage on macOS 14 (ARM64)
         include:
           - os: macos-14
-            node-version: 22
+            node-version: 24
           - os: windows-2022
-            node-version: 22
+            node-version: 24
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Compute version
@@ -40,26 +40,26 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Computed version: $VERSION"
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm ci
       - run: npm test
       - name: Build Node.js prebuild
-        if: ${{ matrix.node-version == 22 }}
+        if: ${{ matrix.node-version == 24 }}
         run: npm run prebuild
       - name: Verify Node.js prebuild layout
-        if: ${{ matrix.node-version == 22 }}
+        if: ${{ matrix.node-version == 24 }}
         run: |
           node -e "const fs=require('fs'); const path=require('path'); const dirs=fs.readdirSync('prebuilds',{withFileTypes:true}).filter((entry)=>entry.isDirectory()).map((entry)=>entry.name); if(!dirs.includes('assets')) throw new Error('missing prebuilds/assets'); const platformDirs=dirs.filter((name)=>name!=='assets'); if(platformDirs.length!==1) throw new Error('expected one platform prebuild directory, found '+platformDirs.join(',')); const addon=path.join('prebuilds', platformDirs[0], 'opencc.node'); if(!fs.existsSync(addon)) throw new Error('missing '+addon); console.log('Verified '+addon+' with shared assets');"
       - name: Test Node.js prebuild
-        if: ${{ matrix.node-version == 22 }}
+        if: ${{ matrix.node-version == 24 }}
         env:
           PREBUILDS_ONLY: 1
         run: npm test
       - name: upload artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opencc-${{ env.VERSION }}-nodejs-${{ matrix.os }}-node-${{ matrix.node-version }}
           path: |

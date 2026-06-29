@@ -28,7 +28,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const nodeGypBuild = require('node-gyp-build');
 const packageRoot = path.join(__dirname, '..');
 
 function requireOptionalPackage(packageName) {
@@ -43,17 +42,32 @@ function requireOptionalPackage(packageName) {
 }
 
 function resolveBindingPath() {
-  try {
-    return nodeGypBuild.path(packageRoot);
-  } catch (error) {
-    const scopedBinaryPackage = requireOptionalPackage(
-      `@opencc/opencc-${process.platform}-${process.arch}`
-    );
-    if (scopedBinaryPackage && scopedBinaryPackage.binaryPath) {
-      return scopedBinaryPackage.binaryPath;
+  // The addon is always named opencc.node and ships either as a local build
+  // (build/Release, also used by the node-gyp source build and the Bazel
+  // sandbox), as a prebuild under prebuilds/<platform>-<arch>/, or via an
+  // @opencc/opencc-<platform>-<arch> scoped package. A direct filesystem lookup
+  // replaces node-gyp-build (OpenCC ships a single N-API build per platform).
+  const candidates = [
+    path.join(packageRoot, 'build', 'Release', 'opencc.node'),
+    path.join(
+      packageRoot, 'prebuilds', `${process.platform}-${process.arch}`, 'opencc.node'
+    ),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
     }
-    throw error;
   }
+  const scopedBinaryPackage = requireOptionalPackage(
+    `@opencc/opencc-${process.platform}-${process.arch}`
+  );
+  if (scopedBinaryPackage && scopedBinaryPackage.binaryPath) {
+    return scopedBinaryPackage.binaryPath;
+  }
+  throw new Error(
+    'Could not locate the opencc native addon (looked in build/Release, ' +
+    'prebuilds/, and @opencc/opencc-* scoped packages)'
+  );
 }
 
 const bindingPath = resolveBindingPath();
@@ -178,7 +192,12 @@ function patchConfigPaths(config, jieba, mainAssetsDir) {
       }
     }
   }
-  // Absolutify conversion_chain dict file paths
+  // Absolutify normalization and conversion_chain dict file paths
+  if (Array.isArray(config.normalization)) {
+    for (const step of config.normalization) {
+      patchDictPaths(step.dict, mainAssetsDir);
+    }
+  }
   if (Array.isArray(config.conversion_chain)) {
     for (const step of config.conversion_chain) {
       patchDictPaths(step.dict, mainAssetsDir);
@@ -226,6 +245,15 @@ const OpenCC = module.exports = function (config, options) {
   const includeTofuRiskDictionaries =
     options.includeTofuRiskDictionaries !== false;
 
+  if (options.resourceZip) {
+    this.handler = new binding.Opencc(
+      config,
+      options.resourceZip,
+      includeTofuRiskDictionaries
+    );
+    return;
+  }
+
   // When opencc-jieba is installed, check if the requested config is a jieba
   // config. If so, load its JSON, patch all paths to absolute, and pass the
   // patched JSON string directly to the C++ layer via NewFromString.
@@ -271,6 +299,12 @@ function parseJSON(str) {
 // This is to support both CommonJS and ES module.
 OpenCC.OpenCC = OpenCC;
 OpenCC._parseJSON = parseJSON;
+
+// Resolved native addon path and its adjacent assets (config/dictionary)
+// directory, exported so tooling/tests can locate them without re-deriving the
+// lookup (and without depending on node-gyp-build).
+OpenCC._bindingPath = bindingPath;
+OpenCC._assetsPath = assetsPath;
 
 /**
  * The version of OpenCC library.

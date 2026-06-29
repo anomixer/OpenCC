@@ -27,10 +27,14 @@
 #endif
 
 #include <rapidjson/document.h>
+#include <rapidjson/schema.h>
+#include <rapidjson/stringbuffer.h>
 
 #include "Config.hpp"
 #include "ConversionChain.hpp"
 #include "Converter.hpp"
+#include "PipelineConverter.hpp"
+#include "SingleStageConverter.hpp"
 #include "DictGroup.hpp"
 #include "Exception.hpp"
 #include "Lexicon.hpp"
@@ -45,6 +49,10 @@
 #endif
 
 typedef rapidjson::GenericValue<rapidjson::UTF8<char>> JSONValue;
+
+static const char kConfigSchemaJson[] =
+#include "opencc_config_schema.inc"
+;
 
 namespace opencc {
 
@@ -311,6 +319,24 @@ public:
     return doc[name].GetBool();
   }
 
+  DictGroupMatchPolicy GetOptionalDictGroupMatchPolicy(const JSONValue& doc) {
+    if (!doc.HasMember("match_policy")) {
+      return DictGroupMatchPolicy::ShortCircuit;
+    }
+    if (!doc["match_policy"].IsString()) {
+      throw InvalidFormat("Property must be a std::string: match_policy");
+    }
+    const std::string matchPolicy = doc["match_policy"].GetString();
+    if (matchPolicy == "short_circuit") {
+      return DictGroupMatchPolicy::ShortCircuit;
+    }
+    if (matchPolicy == "union") {
+      return DictGroupMatchPolicy::Union;
+    }
+    throw InvalidFormat("Unknown dictionary group match_policy: " +
+                        matchPolicy);
+  }
+
   template <typename DICT>
   DictPtr LoadDictWithResourceProvider(const std::string& cachePrefix,
                                        const std::string& fileName) {
@@ -351,11 +377,80 @@ public:
     throw FileNotFound(path);
   }
 
+  DictPtr LoadTextMarisaDictWithResourceProvider(const std::string& fileName) {
+    if (resourceProvider == nullptr) {
+      throw FileNotFound(fileName);
+    }
+
+    const std::shared_ptr<const ResourceProvider::Resource> resource =
+        resourceProvider->GetResource(fileName);
+    std::string cacheKey = "text-marisa\n" + resource->CacheKey();
+    {
+      std::lock_guard<std::mutex> lock(DictCacheMutex());
+      PruneExpiredDictCache();
+      const auto cached = DictCache().find(cacheKey);
+      if (cached != DictCache().end()) {
+        DictPtr dict = cached->second.lock();
+        if (dict != nullptr) {
+          return dict;
+        }
+      }
+    }
+
+    TextDictPtr textDict = TextDict::NewFromBuffer(resource->Data(),
+                                                   resource->Size());
+    DictPtr dict = MarisaDict::NewFromDict(*textDict.get());
+    {
+      std::lock_guard<std::mutex> lock(DictCacheMutex());
+      PruneExpiredDictCache();
+      std::weak_ptr<Dict>& cached = DictCache()[cacheKey];
+      DictPtr cachedDict = cached.lock();
+      if (cachedDict == nullptr) {
+        cached = dict;
+        return dict;
+      }
+      return cachedDict;
+    }
+  }
+
+  DictPtr LoadOcd2DictWithResourceProvider(const std::string& fileName) {
+    if (resourceProvider == nullptr) {
+      throw FileNotFound(fileName);
+    }
+
+    const std::shared_ptr<const ResourceProvider::Resource> resource =
+        resourceProvider->GetResource(fileName);
+    std::string cacheKey = "ocd2-marisa\n" + resource->CacheKey();
+    {
+      std::lock_guard<std::mutex> lock(DictCacheMutex());
+      PruneExpiredDictCache();
+      const auto cached = DictCache().find(cacheKey);
+      if (cached != DictCache().end()) {
+        DictPtr dict = cached->second.lock();
+        if (dict != nullptr) {
+          return dict;
+        }
+      }
+    }
+
+    DictPtr dict = MarisaDict::NewFromBuffer(resource->Data(), resource->Size());
+    {
+      std::lock_guard<std::mutex> lock(DictCacheMutex());
+      PruneExpiredDictCache();
+      std::weak_ptr<Dict>& cached = DictCache()[cacheKey];
+      DictPtr cachedDict = cached.lock();
+      if (cachedDict == nullptr) {
+        cached = dict;
+        return dict;
+      }
+      return cachedDict;
+    }
+  }
+
   DictPtr LoadDictFromFile(const std::string& type,
                            const std::string& fileName) {
     if (type == "text") {
-      DictPtr dict = LoadDictWithResourceProvider<TextDict>("text", fileName);
-      return MarisaDict::NewFromDict(*dict.get());
+      return LoadTextMarisaDictWithResourceProvider(fileName);
     }
 #ifdef ENABLE_DARTS
     if (type == "ocd") {
@@ -363,6 +458,13 @@ public:
     }
 #endif
     if (type == "ocd2") {
+      if (resourceProvider != nullptr) {
+        try {
+          return LoadOcd2DictWithResourceProvider(fileName);
+        } catch (const FileNotFound&) {
+          // Fallback to loading from resolved file path
+        }
+      }
       return LoadDictWithResourceProvider<MarisaDict>("ocd2", fileName);
     }
     throw InvalidFormat("Unknown dictionary type: " + type);
@@ -414,6 +516,8 @@ public:
     }
 
     if (type == "group") {
+      const DictGroupMatchPolicy matchPolicy =
+          GetOptionalDictGroupMatchPolicy(doc);
       std::list<DictPtr> dicts;
       const JSONValue& docs = GetArrayProperty(doc, "dicts");
       for (rapidjson::SizeType i = 0; i < docs.Size(); i++) {
@@ -429,7 +533,13 @@ public:
       if (dicts.empty()) {
         return DictPtr();
       }
-      return DictGroupPtr(new DictGroup(dicts));
+      switch (matchPolicy) {
+      case DictGroupMatchPolicy::ShortCircuit:
+        return DictGroupPtr(new DictGroup(dicts, matchPolicy));
+      case DictGroupMatchPolicy::Union:
+        return DictGroupPtr(new UnionDictGroup(dicts));
+      }
+      throw InvalidFormat("Unsupported dictionary group match_policy");
     } else {
       std::string fileName = GetStringProperty(doc, "file");
       DictPtr dict = LoadDictFromFile(type, fileName);
@@ -610,8 +720,14 @@ Config::NewFromFile(const std::string& fileName,
   std::string prefixedFileName;
   if (provider != nullptr) {
     try {
-      prefixedFileName = provider->Resolve(fileName);
+      const std::shared_ptr<const ResourceProvider::Resource> resource =
+          provider->GetResource(fileName);
+      impl->configDirectory = GetParentDirectory(resource->Name());
+      return NewFromString(std::string(resource->Data(), resource->Size()),
+                           provider, options);
     } catch (const FileNotFound&) {
+      // Some callers pass a provider for dictionaries only; keep normal config
+      // file lookup as a fallback when the provider cannot supply the config.
       prefixedFileName = impl->FindConfigFile(fileName);
     }
   } else {
@@ -630,7 +746,12 @@ Config::NewFromFile(const std::string& fileName,
   if (slashPos != std::string::npos) {
     impl->configDirectory = prefixedFileName.substr(0, slashPos) + "/";
   }
-  return NewFromString(content, provider, options);
+  std::shared_ptr<ResourceProvider> effectiveProvider = provider;
+  if (effectiveProvider == nullptr) {
+    effectiveProvider =
+        NewFilesystemResourceProvider(impl->configDirectory, impl->paths);
+  }
+  return NewFromString(content, effectiveProvider, options);
 }
 
 ConverterPtr Config::NewFromFile(const std::string& fileName,
@@ -735,6 +856,29 @@ Config::NewFromString(const std::string& json,
     throw InvalidFormat("Root of configuration must be an object");
   }
 
+  // Schema validation: warn on violations but continue parsing.
+  {
+    rapidjson::Document schemaDoc;
+    schemaDoc.Parse(kConfigSchemaJson);
+    if (!schemaDoc.HasParseError() && schemaDoc.IsObject()) {
+      rapidjson::SchemaDocument schema(schemaDoc);
+      rapidjson::SchemaValidator validator(schema);
+      if (!doc.Accept(validator)) {
+        rapidjson::StringBuffer docPath;
+        validator.GetInvalidDocumentPointer().Stringify(docPath);
+        rapidjson::StringBuffer schemaPath;
+        validator.GetInvalidSchemaPointer().Stringify(schemaPath);
+        fprintf(stderr,
+                "warning: config does not conform to schema: "
+                "document path \"%s\", schema path \"%s\", keyword \"%s\"\n",
+                docPath.GetString(), schemaPath.GetString(),
+                validator.GetInvalidSchemaKeyword()
+                    ? validator.GetInvalidSchemaKeyword()
+                    : "");
+      }
+    }
+  }
+
   // Optional: name
   std::string name;
   if (doc.HasMember("name") && doc["name"].IsString()) {
@@ -745,14 +889,27 @@ Config::NewFromString(const std::string& json,
   impl->options = options;
   impl->resourceProvider = provider;
 
-  // Required: segmentation
-  SegmentationPtr segmentation =
-      impl->ParseSegmentation(impl->GetObjectProperty(doc, "segmentation"));
+  // Optional: segmentation
+  SegmentationPtr segmentation;
+  if (doc.HasMember("segmentation")) {
+    segmentation =
+        impl->ParseSegmentation(impl->GetObjectProperty(doc, "segmentation"));
+  }
 
   // Required: conversion_chain
   ConversionChainPtr chain = impl->ParseConversionChain(
       impl->GetArrayProperty(doc, "conversion_chain"));
-  return ConverterPtr(new Converter(name, segmentation, chain));
+  ConverterPtr mainConverter(new SingleStageConverter(segmentation, chain));
+
+  // Optional: normalization — a conversion chain applied before segmentation
+  if (doc.HasMember("normalization")) {
+    ConversionChainPtr normChain = impl->ParseConversionChain(
+        impl->GetArrayProperty(doc, "normalization"));
+    ConverterPtr normConverter(new SingleStageConverter(nullptr, normChain));
+    return ConverterPtr(
+        new PipelineConverter({std::move(normConverter), std::move(mainConverter)}));
+  }
+  return mainConverter;
 }
 
 }; // namespace opencc

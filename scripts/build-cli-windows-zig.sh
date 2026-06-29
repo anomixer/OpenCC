@@ -22,7 +22,7 @@
 #   ZIG                 Zig executable to use. Defaults to "zig".
 #   ZIG_TARGET          Zig target triple. Defaults to "x86_64-windows-gnu".
 #   ZIG_OPTIMIZE        Optimization flag. Defaults to "-O2".
-#   OPENCC_VERSION      VERSION macro value. Defaults to MODULE.bazel version.
+#   OPENCC_VERSION      OPENCC_VERSION macro value. Defaults to MODULE.bazel version.
 #   ZIG_LOCAL_CACHE_DIR Zig local cache. Defaults to "$ROOT/.zig-local-cache".
 #   ZIG_GLOBAL_CACHE_DIR Zig global cache. Defaults to "$ROOT/.zig-global-cache".
 
@@ -76,8 +76,10 @@ sources=(
   src/Lexicon.cpp
   src/MarisaDict.cpp
   src/MaxMatchSegmentation.cpp
-  src/PluginSegmentation.cpp
   src/PhraseExtract.cpp
+  src/PipelineConverter.cpp
+  src/PluginSegmentation.cpp
+  src/SingleStageConverter.cpp
   src/PrefixMatch.cpp
   src/ResourceProvider.cpp
   src/Segmentation.cpp
@@ -106,7 +108,7 @@ set +e
   -w \
   -Wno-nullability-completeness \
   -DNDEBUG \
-  "-DVERSION=\"$version\"" \
+  "-DOPENCC_VERSION=\"$version\"" \
   -DOpencc_BUILT_AS_STATIC \
   -I. \
   -Isrc \

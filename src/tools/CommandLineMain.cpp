@@ -22,6 +22,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -37,7 +38,9 @@
 #include "src/ConversionInspection.hpp"
 #include "src/Converter.hpp"
 #include "src/Exception.hpp"
+#include "src/ResourceProvider.hpp"
 #include "src/Segments.hpp"
+#include "src/UTF8Util.hpp"
 #include "src/tools/CommandLineMain.hpp"
 #include "src/tools/PlatformIO.hpp"
 
@@ -98,6 +101,8 @@ bool inPlace = false;
 OutputMode outputMode = OutputMode::Convert;
 Config config;
 ConverterPtr converter;
+bool variationSelectorWarningShown = false;
+std::string variationSelectorScanTail;
 
 struct MeasurementResult {
   double loadMs = 0.0;
@@ -246,6 +251,47 @@ void PrintInteractiveStdinHint() {
 #endif
 }
 
+void PrintVariationSelectorWarningOnce() {
+  if (variationSelectorWarningShown) {
+    return;
+  }
+  variationSelectorWarningShown = true;
+  fprintf(stderr,
+          "warning: input contains Unicode variation selectors (possible IVS); "
+          "conversion results may be inaccurate.\n");
+}
+
+void WarnIfTextContainsVariationSelector(const char* input, size_t length) {
+  if (variationSelectorWarningShown) {
+    return;
+  }
+  if (UTF8Util::ContainsVariationSelector(input, length)) {
+    PrintVariationSelectorWarningOnce();
+  }
+}
+
+void WarnIfStreamChunkContainsVariationSelector(const char* input,
+                                                size_t length) {
+  if (variationSelectorWarningShown) {
+    return;
+  }
+
+  std::string scan = variationSelectorScanTail;
+  scan.append(input, length);
+  if (UTF8Util::ContainsVariationSelector(scan.data(), scan.size())) {
+    PrintVariationSelectorWarningOnce();
+    variationSelectorScanTail.clear();
+    return;
+  }
+
+  const size_t maxVariationSelectorUtf8Bytes = 4;
+  const size_t keepBytes = scan.size() < maxVariationSelectorUtf8Bytes
+                               ? scan.size()
+                               : maxVariationSelectorUtf8Bytes;
+  variationSelectorScanTail.assign(scan.data() + scan.size() - keepBytes,
+                                   keepBytes);
+}
+
 // Serializes the segmentation-only view of an inspection result as a JSON
 // object with "input" and "segments" fields. Used with --segmentation mode.
 std::string SerializeSegmentationResultJson(
@@ -254,30 +300,31 @@ std::string SerializeSegmentationResultJson(
   rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
   writer.StartObject();
   writer.Key("input");
-  writer.String(result.input.c_str());
+  writer.String(result.input.c_str(), result.input.size());
   writer.Key("segments");
   writer.StartArray();
   for (const auto& seg : result.segments) {
-    writer.String(seg.c_str());
+    writer.String(seg.c_str(), seg.size());
   }
   writer.EndArray();
   writer.EndObject();
   return buffer.GetString();
 }
 
-// Serializes the full inspection result as a JSON object with "input",
-// "segments", "stages", and "output" fields. Used with --inspect mode.
-std::string SerializeInspectionResultJson(
-    const ConversionInspectionResult& result) {
-  rapidjson::StringBuffer buffer;
-  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+// Writes a ConversionInspectionResult as a JSON object into writer.
+// Handles both SingleStageConverter results (segments + stages) and
+// PipelineConverter results (pipelineStages), and is called recursively
+// for nested pipeline stages.
+template <typename Writer>
+void WriteInspectionResultJson(Writer& writer,
+                               const ConversionInspectionResult& result) {
   writer.StartObject();
   writer.Key("input");
-  writer.String(result.input.c_str());
+  writer.String(result.input.c_str(), result.input.size());
   writer.Key("segments");
   writer.StartArray();
   for (const auto& seg : result.segments) {
-    writer.String(seg.c_str());
+    writer.String(seg.c_str(), seg.size());
   }
   writer.EndArray();
   writer.Key("stages");
@@ -289,26 +336,42 @@ std::string SerializeInspectionResultJson(
     writer.Key("segments");
     writer.StartArray();
     for (const auto& seg : stage.segments) {
-      writer.String(seg.c_str());
+      writer.String(seg.c_str(), seg.size());
     }
     writer.EndArray();
     writer.EndObject();
   }
   writer.EndArray();
+  writer.Key("pipelineStages");
+  writer.StartArray();
+  for (const auto& ps : result.pipelineStages) {
+    WriteInspectionResultJson(writer, ps);
+  }
+  writer.EndArray();
   writer.Key("output");
-  writer.String(result.output.c_str());
+  writer.String(result.output.c_str(), result.output.size());
   writer.EndObject();
+}
+
+// Serializes the full inspection result as a JSON object. Used with
+// --inspect mode. Handles both single-stage and pipeline converters.
+std::string SerializeInspectionResultJson(
+    const ConversionInspectionResult& result) {
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  WriteInspectionResultJson(writer, result);
   return buffer.GetString();
 }
 
 std::string ConvertLineByMode(const std::string& line) {
+  WarnIfTextContainsVariationSelector(line.c_str(), line.size());
   const auto convertStart = std::chrono::steady_clock::now();
   std::string output;
   if (outputMode == OutputMode::Segmentation) {
     // True segmentation-only path: call the segmenter directly without
     // running any conversion stage.
     const SegmentsPtr& segments =
-        converter->GetSegmentation()->Segment(line);
+        converter->GetSegmentation()->Segment(std::string_view(line));
     ConversionInspectionResult result;
     result.input = line;
     result.segments = segments->ToVector();
@@ -317,7 +380,7 @@ std::string ConvertLineByMode(const std::string& line) {
     const ConversionInspectionResult& result = converter->Inspect(line);
     output = SerializeInspectionResultJson(result);
   } else {
-    output = converter->Convert(line);
+    output = converter->Convert(std::string_view(line));
   }
   measurement.convertMs += DurationToMilliseconds(
       std::chrono::steady_clock::now() - convertStart);
@@ -335,12 +398,13 @@ void ConvertStream(FILE* fin, FILE* fout) {
       break;
     }
     measurement.inputBytes += length;
+    WarnIfStreamChunkContainsVariationSelector(buffer.data(), length);
 
     const auto convertStart = std::chrono::steady_clock::now();
     const bool isFinalChunk = length < buffer.size() && feof(fin);
-    const std::string& converted =
-        isFinalChunk ? stream.Finish(buffer.data(), length)
-                     : stream.ConvertChunk(buffer.data(), length);
+    const std::string converted =
+        isFinalChunk ? stream.Finish({buffer.data(), length})
+                     : stream.ConvertChunk({buffer.data(), length});
     measurement.convertMs += DurationToMilliseconds(
         std::chrono::steady_clock::now() - convertStart);
     measurement.outputBytes += converted.size();
@@ -506,7 +570,7 @@ int CommandLineMain(std::vector<std::string> args) {
   try {
     const auto totalStart = std::chrono::steady_clock::now();
     TCLAP::CmdLine cmd("Open Chinese Convert (OpenCC) Command Line Tool", ' ',
-                       VERSION);
+                       OPENCC_VERSION);
     OpenCCOutput cmdLineOutput;
     cmd.setOutput(&cmdLineOutput);
 
@@ -550,7 +614,40 @@ int CommandLineMain(std::vector<std::string> args) {
         "default, the command line tool skips these dictionaries.",
         cmd, false);
     const std::string argv0String = args.empty() ? std::string() : args[0];
-    cmd.parse(args);
+    Optional<std::string> resourceZipFileName =
+        Optional<std::string>::Null();
+    std::vector<std::string> visibleArgs;
+    if (!args.empty()) {
+      visibleArgs.push_back(args[0]);
+    }
+    for (size_t i = 1; i < args.size(); i++) {
+      const std::string& arg = args[i];
+      std::string value;
+      if (arg == "--resource-zip") {
+        if (i + 1 >= args.size() || args[i + 1].empty() ||
+            args[i + 1][0] == '-') {
+          std::cerr << "error: Missing value for " << arg << std::endl;
+          return 1;
+        }
+        value = args[++i];
+      } else if (arg.rfind("--resource-zip=", 0) == 0) {
+        value = arg.substr(std::string("--resource-zip=").size());
+      } else {
+        visibleArgs.push_back(arg);
+        continue;
+      }
+      if (value.empty()) {
+        std::cerr << "error: Missing value for " << arg << std::endl;
+        return 1;
+      }
+      if (!resourceZipFileName.IsNull()) {
+        std::cerr << "error: resource zip specified more than once."
+                  << std::endl;
+        return 1;
+      }
+      resourceZipFileName = Optional<std::string>(value);
+    }
+    cmd.parse(visibleArgs);
 
     // Validate mutual exclusion and dependencies
     if (segmentationArg.getValue() && inspectArg.getValue()) {
@@ -586,11 +683,23 @@ int CommandLineMain(std::vector<std::string> args) {
     ConfigLoadOptions configOptions;
     configOptions.includeTofuRiskDictionaries =
         includeTofuRiskDictionariesArg.getValue();
-    converter =
-        config.NewFromFile(configFileName, pathArg.getValue(), argv0,
-                           configOptions);
+    if (!resourceZipFileName.IsNull()) {
+      std::shared_ptr<ResourceProvider> provider(
+          new ZipResourceProvider(resourceZipFileName.Get()));
+      converter = config.NewFromFile(configFileName, provider, configOptions);
+    } else {
+      converter =
+          config.NewFromFile(configFileName, pathArg.getValue(), argv0,
+                             configOptions);
+    }
     measurement.loadMs +=
         DurationToMilliseconds(std::chrono::steady_clock::now() - loadStart);
+    if (outputMode == OutputMode::Segmentation &&
+        converter->GetSegmentation() == nullptr) {
+      std::cerr << "error: this configuration has no segmentation step; "
+                   "--segmentation is not supported.\n";
+      return 1;
+    }
     bool lineByLine = inputFileName.IsNull();
     measurement.lineByLine = lineByLine;
     measurement.outputMode = outputMode;

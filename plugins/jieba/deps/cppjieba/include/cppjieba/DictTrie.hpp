@@ -20,8 +20,6 @@
 
 namespace cppjieba {
 
-const double MIN_DOUBLE = -3.14e+100;
-const double MAX_DOUBLE = 3.14e+100;
 const size_t DICT_COLUMN_NUM = 3;
 const char* const UNKNOWN_TAG = "";
 
@@ -166,7 +164,7 @@ class DictTrie {
     std::vector<std::string> files = Split(filePaths, "|;");
     for (size_t i = 0; i < files.size(); i++) {
       std::ifstream ifs;
-      OpenInputFile(files[i], ifs);
+      OpenInputFile(ifs, files[i]);
       XCHECK(ifs.is_open()) << "open " << files[i] << " failed";
       std::string line;
 
@@ -217,7 +215,8 @@ class DictTrie {
 
   void Init(const PrecomputedDict& dict, const std::string& user_dict_paths,
             UserWordWeightOption user_word_weight_opt) {
-    base_static_node_infos_.reset(new std::vector<DictUnit>(dict.node_infos));
+    base_static_node_infos_ = std::shared_ptr<const std::vector<DictUnit> >(
+        new std::vector<DictUnit>(dict.node_infos));
     user_dict_single_chinese_word_ = dict.single_char_user_words;
     freq_sum_ = dict.freq_sum;
     min_weight_ = dict.min_weight;
@@ -279,7 +278,7 @@ class DictTrie {
     DictCacheEntry entry;
     std::vector<DictUnit> node_infos;
     std::ifstream ifs;
-    OpenInputFile(filePath, ifs);
+    OpenInputFile(ifs, filePath);
     XCHECK(ifs.is_open()) << "open " << filePath << " failed.";
     std::string line;
     std::vector<std::string> buf;

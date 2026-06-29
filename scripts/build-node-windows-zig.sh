@@ -38,7 +38,9 @@ sources=(
   src/Lexicon.cpp
   src/MarisaDict.cpp
   src/MaxMatchSegmentation.cpp
+  src/PipelineConverter.cpp
   src/PluginSegmentation.cpp
+  src/SingleStageConverter.cpp
   src/PrefixMatch.cpp
   src/ResourceProvider.cpp
   src/Segmentation.cpp
@@ -66,7 +68,7 @@ set +e
   -w \
   -Wno-nullability-completeness \
   -DNDEBUG \
-  '-DVERSION="1.3.2"' \
+  '-DOPENCC_VERSION="1.3.2"' \
   -DNAPI_DISABLE_CPP_EXCEPTIONS \
   -DOpencc_BUILT_AS_STATIC \
   -I. \

@@ -48,16 +48,17 @@ Discussion (Telegram): https://t.me/open_chinese_convert
     * 使用 `npm install -g opencc` 命令可安裝 OpenCC Node.js CLI
     * 使用 `npm install -g opencc opencc-jieba` 命令可同時安裝 OpenCC Node.js CLI 及 Jieba 分詞插件
 * [Python](https://pypi.org/project/OpenCC/)
+    * 使用 `pip install opencc` 命令可安裝 Python API 及 Python CLI
 * [More (Repology)](https://repology.org/project/opencc/versions)
 
 ### Prebuilt binaries 預編譯二進位檔
 
-* Windows (x86_64): [OpenCC-1.3.1](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.1/OpenCC-1.3.1-windows-x64-portable.zip) ([SHA-256](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.1/OpenCC-1.3.1-windows-x64-portable.zip.sha256))
+* Windows (x86_64): [OpenCC-1.3.2](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.2/OpenCC-1.3.2-windows-x64-portable.zip) ([SHA-256](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.2/OpenCC-1.3.2-windows-x64-portable.zip.sha256))
     * This Windows release is available from WinGet. For details, see [doc/windows-winget-release.md](doc/windows-winget-release.md).
     * Requires Microsoft Visual C++ Redistributable for Visual Studio 2015-2026. Download the latest version from [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version).
 * Debian/Ubuntu (amd64):
-    * [opencc_1.3.1_amd64.deb](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.1/opencc_1.3.1_amd64.deb)
-    * [opencc-jieba_1.3.1_amd64.deb](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.1/opencc-jieba_1.3.1_amd64.deb)
+    * [opencc_1.3.2_amd64.deb](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.2/opencc_1.3.2_amd64.deb)
+    * [opencc-jieba_1.3.2_amd64.deb](https://github.com/BYVoid/OpenCC/releases/download/ver.1.3.2/opencc-jieba_1.3.2_amd64.deb)
 
 ## Usage 使用
 
@@ -106,6 +107,17 @@ import opencc
 converter = opencc.OpenCC('s2t.json')
 converter.convert('汉字')  # 漢字
 ```
+
+The Python package also installs a basic CLI:
+
+```sh
+pip install opencc
+opencc -c s2t.json -i input.txt -o output.txt
+```
+
+The Python CLI supports basic text conversion, `--include-tofu-risk-dictionaries`,
+and `--resource-zip`. Diagnostic modes such as `--inspect` and `--segmentation`
+still require the native OpenCC CLI.
 
 ### C++
 
@@ -169,6 +181,11 @@ int main() {
 
 ### Command Line
 
+Unless otherwise noted, this section describes the native OpenCC CLI built from
+the C++ toolchain. The Python and npm CLIs support basic file/stdin conversion
+only, plus `--include-tofu-risk-dictionaries`; the Python CLI also supports
+`--resource-zip`.
+
 * `opencc --help`
 * `opencc_dict --help`
 
@@ -201,18 +218,26 @@ These modes are useful for diagnosing conversion issues:
 Rules:
 - `--segmentation` and `--inspect` are mutually exclusive.
 
+### Official / Recommended Ports
+
+The following ports are maintained within the OpenCC ecosystem and are generally up to date with current configuration and dictionary data.
+
+* Data package: [opencc-data](https://www.npmjs.com/package/opencc-data)
+* Pure JavaScript: [opencc-js](https://www.npmjs.com/package/opencc-js)
+    * See [notes about different OpenCC NPM packages](#links-%E7%9B%B8%E9%97%9C%E9%8F%88%E6%8E%A5) below.
+* WebAssembly: [opencc-wasm](https://www.npmjs.com/package/opencc-wasm) ([website](https://opencc.js.org/))
+* Pure Python: [opencc-py](https://pypi.org/project/opencc-py/) (pre-release)
+
 ### Other Ports (Unofficial)
+
+These ports are community-maintained and may not always track upstream updates.
 
 * Swift (iOS): [SwiftyOpenCC](https://github.com/XQS6LB3A/SwiftyOpenCC)
 * iOSOpenCC (pod): [iOSOpenCC](https://github.com/swiftdo/OpenCC)
 * Java: [opencc4j](https://github.com/houbb/opencc4j)
 * Android: [android-opencc](https://github.com/qichuan/android-opencc)
 * PHP: [opencc4php](https://github.com/nauxliu/opencc4php)
-* Pure JavaScript: [opencc-js](https://github.com/nk2028/opencc-js)
-    * See [notes about different OpenCC NPM packages](#links-%E7%9B%B8%E9%97%9C%E9%8F%88%E6%8E%A5) below.
-* WebAssembly:
-    * [opencc-wasm](https://www.npmjs.com/package/opencc-wasm) ([website](https://opencc.js.org/))
-    * [wasm-opencc](https://github.com/oyyd/wasm-opencc)
+* WebAssembly: [wasm-opencc](https://github.com/oyyd/wasm-opencc)
 * Browser Extension: [opencc-extension](https://github.com/tnychn/opencc-extension)
 * Go (Pure): [OpenCC for Go](https://github.com/longbridge/opencc)
 * Dart (native-assets): [opencc-dart](https://github.com/lindeer/opencc-dart)

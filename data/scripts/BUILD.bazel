@@ -21,6 +21,28 @@ py_binary(
     srcs = ["extract_tofu_risk.py"],
 )
 
+py_binary(
+    name = "opencc_resources_zip",
+    srcs = ["opencc_resources_zip.py"],
+)
+
+py_binary(
+    name = "opencc_resources_zip_diff",
+    srcs = ["opencc_resources_zip_diff.py"],
+)
+
+py_binary(
+    name = "minify_json_to_inc",
+    srcs = ["minify_json_to_inc.py"],
+)
+
+py_binary(
+    name = "generate_st_phrases_from_regional_phrases",
+    srcs = ["generate_st_phrases_from_regional_phrases.py"],
+    imports = ["."],
+    deps = [":common"],
+)
+
 py_test(
     name = "common_test",
     size = "small",

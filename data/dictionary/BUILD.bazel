@@ -27,8 +27,11 @@ genrule(
 
 TEXT_DICTS = glob(
     ["*.txt"],
-    exclude = ["CJK_Compatibility_Ideographs.txt"],
+    exclude = [
+        "CJK_Compatibility_Ideographs.txt",
+    ],
 ) + [
+    "STPhrases_GeneratedFromRegionalPhrases.txt",
     "TSCharactersExt.txt",
     "TWVariantsRev.txt",
     "HKVariantsRev.txt",
@@ -60,14 +63,53 @@ NON_BMP_TEXT_DICTS = [
     for txt in TEXT_DICTS
 ]
 
+genrule(
+    name = "generate_STPhrases_GeneratedFromRegionalPhrases",
+    srcs = [
+        "HKPhrases.txt",
+        "TWPhrases.txt",
+        "CJK_Compatibility_Ideographs.ocd2",
+        "TSCharacters.ocd2",
+        "TSCharactersExt.ocd2",
+        "TSPhrases.ocd2",
+        "//data/config:t2s.json",
+    ],
+    outs = ["STPhrases_GeneratedFromRegionalPhrases.txt"],
+    cmd = "$(location //data/scripts:generate_st_phrases_from_regional_phrases) " +
+          "--input $(location HKPhrases.txt) " +
+          "--input $(location TWPhrases.txt) " +
+          "--output $@ " +
+          "--opencc $(location //src/tools:command_line) " +
+          "--config $(location //data/config:t2s.json) " +
+          "--dict-dir $$(dirname $(location TSPhrases.ocd2))",
+    tools = [
+        "//data/scripts:generate_st_phrases_from_regional_phrases",
+        "//src/tools:command_line",
+    ],
+)
+
 filegroup(
     name = "text_dictionaries",
     srcs = TEXT_DICTS,
 )
 
+genrule(
+    name = "generate_bin_CJK_Compatibility_Ideographs",
+    srcs = ["CJK_Compatibility_Ideographs.txt"],
+    outs = ["CJK_Compatibility_Ideographs.ocd2"],
+    cmd = "$(location //src/tools:dict_converter) " +
+          "--input $(location CJK_Compatibility_Ideographs.txt) " +
+          "--output $(OUTS) " +
+          "--from text " +
+          "--to ocd2",
+    tools = ["//src/tools:dict_converter"],
+)
+
 filegroup(
     name = "binary_dictionaries",
-    srcs = [txt.replace(".txt", ".ocd2") for txt in TEXT_DICTS],
+    srcs = [txt.replace(".txt", ".ocd2") for txt in TEXT_DICTS] + [
+        "CJK_Compatibility_Ideographs.ocd2",
+    ],
 )
 
 [
@@ -118,6 +160,7 @@ cc_test(
     data = [
         "HKPhrases.txt",
         "STPhrases.txt",
+        "STPhrases_GeneratedFromRegionalPhrases.txt",
         "TWPhrases.txt",
     ],
     deps = [
@@ -159,10 +202,12 @@ cc_test(
     srcs = ["DictionaryVariantRevPhrasesTest.cpp"],
     data = [
         "HKVariants.txt",
+        "HKVariantsRev.txt",
         "HKVariantsRevPhrases.txt",
         "STCharacters.txt",
         "STPhrases.txt",
         "TWVariants.txt",
+        "TWVariantsRev.txt",
         "TWVariantsRevPhrases.txt",
     ],
     deps = [

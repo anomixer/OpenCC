@@ -16,7 +16,7 @@ This document compiles the Open Chinese Convert (OpenCC) project information to 
 ### Dictionary Placement Rules
 - Put regional vocabulary differences, such as Mainland-to-Taiwan term choices and place-name translations, in `TWPhrases.txt` / `TWPhrasesRev.txt`, not in `TWVariantsPhrases.txt`. Example: US state or territory names like `特拉華 -> 德拉瓦`, `新澤西 -> 紐澤西`, and `美屬維爾京羣島 -> 美屬維京群島` belong in `TWPhrases.txt`.
 - Reserve `TWVariantsPhrases.txt` for phrase-level exceptions to Taiwan variant character conversion, especially when a phrase must override character-level mappings from `TWVariants.txt`. It is part of `s2tw`, `s2twp`, and `t2tw`; using it for vocabulary translations will incorrectly affect `s2tw`.
-- For `s2twp`, remember the conversion chain is `STPhrases/STCharacters -> TWPhrases -> TWVariantsPhrases/TWVariants`. If a Simplified input phrase must be matched later by `TWPhrases`, add a necessary Simplified-to-Traditional segmentation entry to `STPhrases.txt`; otherwise the phrase can be split before the Taiwan vocabulary stage.
+- For `s2twp` and `s2hkp`, remember the conversion chain is `STPhrases/STCharacters -> regional phrases -> regional variants`. The generated `STPhrases_GeneratedFromRegionalPhrases` dictionary derives Simplified-to-regional-key entries from the first column of `TWPhrases.txt` and `HKPhrases.txt`; standard Simplified-to-Traditional configs use it in both mmseg segmentation and the first ST conversion stage so whole regional keys do not get stranded in Simplified form. Add manual `STPhrases.txt` entries when the generated mapping is not the desired plain `s2t` output, or when `t2s(regional phrase key)` does not match the real Simplified input.
 - Keep `TWPhrases.txt` and `TWPhrasesRev.txt` bidirectionally consistent. Run `bazel test //data/dictionary:dictionary_TWPhrases_reverse_mapping_test` after editing either file.
 - For intentional one-way Taiwan vocabulary conversions, keep the forward mapping in `TWPhrases.txt` and add a self-mapping candidate on both sides so `tw2sp` can preserve the Taiwan term. For example, to make `s2twp` convert `信道 -> 通道` without forcing `tw2sp` to convert every `通道` back to `信道`, use `信道 -> 通道` plus `通道 -> 通道` in `TWPhrases.txt`, and make `TWPhrasesRev.txt` map `通道 -> 通道 信道`. The self-mapping keeps the reverse dictionary structurally consistent while making the reverse conversion prefer unchanged `通道`.
 - Use `python3 data/scripts/sort.py <file> <file>` for edited dictionary files instead of hand-sorting. Dictionary tests enforce sorted unique keys.
@@ -32,6 +32,14 @@ This document compiles the Open Chinese Convert (OpenCC) project information to 
 - `src/*Test.cpp`, `data/config/*Test.cpp`, `plugins/jieba/tests/`, `test/`, and `test/golden/` contain tests covering dictionary matching, conversion chains, configuration validation, plugin segmentation, CLI behavior, and golden conversion outputs.
 - Tools `opencc_dict`, `opencc_phrase_extract` (`src/tools/`) help developers convert dictionary formats and extract phrases.
 - Node.js tests live in `node/test.js`; npm prebuild packaging uses `npm run prebuild` and related scripts in `scripts/`.
+
+### CLI Consistency Follow-up
+- There is ongoing work to align user-facing behavior across the native CLI, npm CLI, and Python CLI. Treat CLI behavior differences as intentional only when they are documented in `README.md` and covered by tests.
+- Known area to unify: `-c/--config` values that omit `.json`. Current target behavior is the npm CLI rule:
+  - Built-in config stems such as `s2t` and `t2s` should resolve to `s2t.json` / `t2s.json`.
+  - Custom config paths should be preserved as given; do not auto-append `.json` for arbitrary filenames.
+- Before changing config resolution rules in one CLI, check the corresponding implementations in `src/tools/CommandLineMain.cpp`, `node/cli.js`, and `python/opencc/__init__.py`, then update tests for all affected surfaces.
+- When possible, add both direct tests and subprocess/integration-style tests so packaging entry points and standalone CLI invocation are covered, not just in-process helper calls.
 
 ## Ecosystem Bindings
 - Python module is located in `python/`, providing the `OpenCC` class through the C API.
@@ -59,6 +67,23 @@ This document compiles the Open Chinese Convert (OpenCC) project information to 
 - **Improper UTF-8 handling**: Overlooking multi-byte characters or surrogate pair handling can easily cause offset or truncation issues.
 - **Incomplete dictionaries/configuration**: Missing segmentation dictionaries, regional differences and other `.ocd2` files will result in missing words in output.
 - **Path and loading process differences**: If OpenCC's path search and configuration parsing details are not followed, the actual loaded resources will differ from official ones, naturally leading to different results.
+
+## Communication Language
+
+Respond in Traditional Chinese (繁體中文) preferred; Simplified Chinese acceptable. When quoting dictionary keys, code identifiers, file names, or any string literal that appears in the codebase in Simplified Chinese, preserve the original Simplified form verbatim — do not transliterate it.
+
+## Commit Message Style
+
+- **First line**: action verb + concise description, no conventional-commit prefix (`feat:`, `fix:`, `perf:`, etc.). Example: `Implement single-dictionary lookup fast-path for PrefixMatch`
+- **Body**: one or two sentences summarising motivation and scope, separated from the title by a blank line.
+- **Multi-area changes**: add a `Detailed Changes:` section with bold headers and sub-bullets:
+  ```
+  Detailed Changes:
+  - **Section Name**:
+    - Sub-point one.
+    - Sub-point two.
+  ```
+- **No** `Co-Authored-By` trailer lines.
 
 ## Further Reading
 

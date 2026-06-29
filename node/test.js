@@ -1,10 +1,9 @@
 const assert = require('assert');
 const childProcess = require('child_process');
 const fs = require('fs');
-const nodeGypBuild = require('node-gyp-build');
 const os = require('os');
 const path = require('path');
-const util = require('util');
+const { after, describe, it } = require('node:test');
 
 const OpenCC = require('./opencc');
 const { prepareArtifacts } = require('../scripts/prepare-node-prebuild-artifacts');
@@ -37,19 +36,24 @@ function createLocalInstalledShape() {
   return root;
 }
 
-const testSync = function (tc, cfg, expected, done) {
+const testSync = function (tc, cfg, expected) {
   const opencc = new OpenCC(cfg + '.json');
   const converted = opencc.convertSync(tc.input);
   assert.equal(converted, expected);
-  done();
 };
 
-const testAsync = function (tc, cfg, expected, done) {
-  const opencc = new OpenCC(cfg + '.json');
-  opencc.convert(tc.input, function (err, converted) {
-    if (err) return done(err);
-    assert.equal(converted, expected);
-    done();
+const testAsync = function (tc, cfg, expected) {
+  return new Promise(function (resolve, reject) {
+    const opencc = new OpenCC(cfg + '.json');
+    opencc.convert(tc.input, function (err, converted) {
+      if (err) return reject(err);
+      try {
+        assert.equal(converted, expected);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
   });
 };
 
@@ -62,8 +66,8 @@ async function testAsyncPromise(tc, cfg, expected) {
 describe('Sync API', function () {
   cases.forEach(function (tc, idx) {
     Object.entries(tc.expected || {}).forEach(function ([cfg, expected]) {
-      it('[' + cfg + '] case #' + (idx + 1), function (done) {
-        testSync(tc, cfg, expected, done);
+      it('[' + cfg + '] case #' + (idx + 1), function () {
+        testSync(tc, cfg, expected);
       });
     });
   });
@@ -116,8 +120,8 @@ describe('API compatibility', function () {
 describe('Async API', function () {
   cases.forEach(function (tc, idx) {
     Object.entries(tc.expected || {}).forEach(function ([cfg, expected]) {
-      it('[' + cfg + '] case #' + (idx + 1), function (done) {
-        testAsync(tc, cfg, expected, done);
+      it('[' + cfg + '] case #' + (idx + 1), function () {
+        return testAsync(tc, cfg, expected);
       });
     });
   });
@@ -126,8 +130,8 @@ describe('Async API', function () {
 describe('Async Promise API', function () {
   cases.forEach(function (tc, idx) {
     Object.entries(tc.expected || {}).forEach(function ([cfg, expected]) {
-      it('[' + cfg + '] case #' + (idx + 1), function (done) {
-        testAsyncPromise(tc, cfg, expected).then(() => done(), done);
+      it('[' + cfg + '] case #' + (idx + 1), function () {
+        return testAsyncPromise(tc, cfg, expected);
       });
     });
   });
@@ -136,17 +140,9 @@ describe('Async Promise API', function () {
 describe('npm CLI', function () {
   const cli = path.join(__dirname, 'cli.js');
 
+  // The opencc module already resolves the addon and its adjacent assets dir.
   function getAssetsPath() {
-    const bindingPath = nodeGypBuild.path(path.join(__dirname, '..'));
-    const bindingDir = path.dirname(bindingPath);
-    const prebuildsDir = path.dirname(bindingDir);
-    if (path.basename(prebuildsDir) === 'prebuilds') {
-      const sharedAssetsPath = path.join(prebuildsDir, 'assets');
-      if (fs.existsSync(sharedAssetsPath)) {
-        return sharedAssetsPath;
-      }
-    }
-    return bindingDir;
+    return OpenCC._assetsPath;
   }
 
   it('converts stdin to stdout', function () {
@@ -282,7 +278,9 @@ describe('npm CLI', function () {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencc-node-cli-config-'));
     const assetsPath = getAssetsPath();
     fs.copyFileSync(path.join(assetsPath, 's2t.json'), path.join(dir, 'custom-s2t.json'));
+    fs.copyFileSync(path.join(assetsPath, 'CJK_Compatibility_Ideographs.ocd2'), path.join(dir, 'CJK_Compatibility_Ideographs.ocd2'));
     fs.copyFileSync(path.join(assetsPath, 'STPhrases.ocd2'), path.join(dir, 'STPhrases.ocd2'));
+    fs.copyFileSync(path.join(assetsPath, 'STPhrases_GeneratedFromRegionalPhrases.ocd2'), path.join(dir, 'STPhrases_GeneratedFromRegionalPhrases.ocd2'));
     fs.copyFileSync(path.join(assetsPath, 'STCharacters.ocd2'), path.join(dir, 'STCharacters.ocd2'));
 
     const result = childProcess.spawnSync(process.execPath, [cli, '-c', './custom-s2t.json'], {
@@ -458,9 +456,12 @@ describe('npm CLI', function () {
 });
 
 describe('Optional opencc-jieba package integration', function () {
-  it('loads jieba configs by mode name in the JavaScript API', function () {
+  it('loads jieba configs by mode name in the JavaScript API', function (t) {
     const installRoot = createLocalInstalledShape();
-    if (!installRoot) this.skip();
+    if (!installRoot) {
+      t.skip();
+      return;
+    }
 
     const script = [
       "const OpenCC = require('opencc');",
@@ -476,9 +477,37 @@ describe('Optional opencc-jieba package integration', function () {
     assert.equal(result.stdout, '雲端計算');
   });
 
-  it('loads jieba configs by mode name in the npm CLI', function () {
+  it('resolves normalization dict paths in jieba configs', function (t) {
     const installRoot = createLocalInstalledShape();
-    if (!installRoot) this.skip();
+    if (!installRoot) {
+      t.skip();
+      return;
+    }
+
+    // U+F900 is a CJK Compatibility Ideograph; normalization maps it to U+8C48.
+    // If normalization dict paths are not resolved correctly the converter fails
+    // to load entirely, so a successful conversion also proves path resolution.
+    const script = [
+      "const OpenCC = require('opencc');",
+      "const converter = new OpenCC('s2twp_jieba');",
+      "const result = converter.convertSync('豈');",
+      "process.stdout.write(result.codePointAt(0).toString(16));",
+    ].join('');
+    const result = childProcess.spawnSync(process.execPath, ['-e', script], {
+      cwd: installRoot,
+      env: { ...process.env },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '8c48');
+  });
+
+  it('loads jieba configs by mode name in the npm CLI', function (t) {
+    const installRoot = createLocalInstalledShape();
+    if (!installRoot) {
+      t.skip();
+      return;
+    }
 
     const result = childProcess.spawnSync(process.execPath, [
       path.join(installRoot, 'node_modules', 'opencc', 'node', 'cli.js'),
@@ -494,9 +523,12 @@ describe('Optional opencc-jieba package integration', function () {
     assert.equal(result.stdout, '雲端計算');
   });
 
-  it('skips tofu-risk dictionaries in jieba configs by default in the npm CLI', function () {
+  it('skips tofu-risk dictionaries in jieba configs by default in the npm CLI', function (t) {
     const installRoot = createLocalInstalledShape();
-    if (!installRoot) this.skip();
+    if (!installRoot) {
+      t.skip();
+      return;
+    }
 
     const result = childProcess.spawnSync(process.execPath, [
       path.join(installRoot, 'node_modules', 'opencc', 'node', 'cli.js'),
@@ -512,9 +544,12 @@ describe('Optional opencc-jieba package integration', function () {
     assert.equal(result.stdout, '㑮');
   });
 
-  it('includes tofu-risk dictionaries in jieba configs when requested in the npm CLI', function () {
+  it('includes tofu-risk dictionaries in jieba configs when requested in the npm CLI', function (t) {
     const installRoot = createLocalInstalledShape();
-    if (!installRoot) this.skip();
+    if (!installRoot) {
+      t.skip();
+      return;
+    }
 
     const result = childProcess.spawnSync(process.execPath, [
       path.join(installRoot, 'node_modules', 'opencc', 'node', 'cli.js'),
