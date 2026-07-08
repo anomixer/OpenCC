@@ -48,7 +48,7 @@ if [[ -z "$version" ]]; then
       MODULE.bazel | head -n 1
   )"
 fi
-version="${version:-1.3.2}"
+version="${version:-1.4.0}"
 
 export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-$ROOT_DIR/.zig-local-cache}"
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$ROOT_DIR/.zig-global-cache}"
@@ -116,7 +116,7 @@ set +e
   -Ideps/marisa-0.3.1/include \
   -Ideps/marisa-0.3.1/lib \
   -Ideps/tclap-1.2.5 \
-  -Ideps/darts-clone-0.32 \
+  -Ideps/darts-clone-0.32h/include \
   "${sources[@]}" \
   -lshell32 \
   -Wl,--strip-all \

@@ -1,6 +1,6 @@
 {
   "name": "opencc",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "description": "Conversion between Traditional and Simplified Chinese",
   "author": "Carbo Kuo <byvoid@byvoid.com>",
   "license": "Apache-2.0",
@@ -44,6 +44,8 @@
     "data/scripts/reverse.py",
     "deps/marisa-0.3.1/include",
     "deps/marisa-0.3.1/lib",
+    "deps/darts-clone-0.32h/COPYING.md",
+    "deps/darts-clone-0.32h/include",
     "deps/rapidjson-1.1.0/rapidjson",
     "node/cli.js",
     "node/configs.gypi",
@@ -57,7 +59,6 @@
     "node/opencc.d.ts",
     "node/opencc.js",
     "node/opencc.mjs",
-    "node/opencc_config.h",
     "prebuilds/assets/*.json",
     "prebuilds/assets/*.ocd2",
     "scripts/prepare-node-prebuild-artifacts.js",
@@ -96,7 +97,6 @@
     "src/MarisaDict.hpp",
     "src/MaxMatchSegmentation.cpp",
     "src/MaxMatchSegmentation.hpp",
-    "src/opencc_config.h",
     "src/opencc.h",
     "src/Optional.hpp",
     "src/PhraseExtract.cpp",
@@ -150,10 +150,10 @@
     "node-gyp-build": "^4.8.4"
   },
   "optionalDependencies": {
-    "@opencc/opencc-darwin-arm64": "1.3.2",
-    "@opencc/opencc-linux-arm64": "1.3.2",
-    "@opencc/opencc-linux-x64": "1.3.2",
-    "@opencc/opencc-win32-x64": "1.3.2"
+    "@opencc/opencc-darwin-arm64": "1.4.0",
+    "@opencc/opencc-linux-arm64": "1.4.0",
+    "@opencc/opencc-linux-x64": "1.4.0",
+    "@opencc/opencc-win32-x64": "1.4.0"
   },
   "overrides": {
     "brace-expansion": "^2.0.3",

@@ -19,6 +19,7 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -31,10 +32,14 @@
 
 #include "Config.hpp"
 #include "ConfigTestBase.hpp"
+#include "ConversionChain.hpp"
 #include "Converter.hpp"
+#include "Dict.hpp"
+#include "Segments.hpp"
 #include "Exception.hpp"
 #include "ResourceProvider.hpp"
 #include "TestUtilsUTF8.hpp"
+#include "UTF8Util.hpp"
 
 namespace opencc {
 namespace {
@@ -184,6 +189,78 @@ std::string InlineSingleStepConfig(const std::string& segmentationEntries,
          "\n"
          "  }]\n"
          "}\n";
+}
+
+std::string ChainConfig(const std::vector<std::string>& dicts) {
+  std::string config =
+      "{\n"
+      "  \"name\": \"Rime Compatibility Test\",\n"
+      "  \"conversion_chain\": [\n";
+  for (size_t i = 0; i < dicts.size(); i++) {
+    config +=
+        "    {\n"
+        "      \"dict\": " +
+        dicts[i] +
+        "\n"
+        "    }";
+    config += (i + 1 == dicts.size()) ? "\n" : ",\n";
+  }
+  config +=
+      "  ]\n"
+      "}\n";
+  return config;
+}
+
+bool ConvertWordLikeRime(const ConversionChainPtr& chain,
+                         const std::string& input,
+                         std::vector<std::string>* converted) {
+  std::vector<std::string> current{input};
+  bool hasExactMatch = false;
+
+  const auto AddIfNew = [](const std::string& value,
+                           std::vector<std::string>* values,
+                           std::set<std::string>* seen) {
+    if (seen->insert(value).second) {
+      values->push_back(value);
+    }
+  };
+
+  for (const ConversionPtr& conversion : chain->GetConversions()) {
+    const DictPtr dict = conversion->GetDict();
+    std::vector<std::string> next;
+    std::set<std::string> seen;
+
+    for (const std::string& word : current) {
+      const Optional<const DictEntry*> exact = dict->Match(word);
+      if (!exact.IsNull()) {
+        hasExactMatch = true;
+        for (const std::string& value : exact.Get()->Values()) {
+          AddIfNew(value, &next, &seen);
+        }
+        continue;
+      }
+
+      std::string fallback;
+      for (const char* pstr = word.c_str(); *pstr != '\0';) {
+        const Optional<const DictEntry*> prefix = dict->MatchPrefix(pstr);
+        size_t matchedLength;
+        if (prefix.IsNull()) {
+          matchedLength = UTF8Util::NextCharLength(pstr);
+          fallback.append(pstr, matchedLength);
+        } else {
+          matchedLength = prefix.Get()->KeyLength();
+          fallback += prefix.Get()->GetDefault();
+        }
+        pstr += matchedLength;
+      }
+      AddIfNew(fallback, &next, &seen);
+    }
+
+    current = std::move(next);
+  }
+
+  *converted = current;
+  return hasExactMatch;
 }
 
 std::string FindOcd2DictionaryDir(const std::string& configTestDirPath) {
@@ -562,6 +639,7 @@ TEST_F(ConfigTest, InlineDictInGroupTakesPriorityOverFollowingFileDict) {
                   "  \"conversion_chain\": [{\n"
                   "    \"dict\": {\n"
                   "      \"type\": \"group\",\n"
+                  "      \"match_policy\": \"short_circuit\",\n"
                   "      \"dicts\": [\n"
                   "        {\n"
                   "          \"type\": \"inline\",\n"
@@ -579,6 +657,40 @@ TEST_F(ConfigTest, InlineDictInGroupTakesPriorityOverFollowingFileDict) {
       config.NewFromString(json, {CONFIG_TEST_DIR_PATH + "/"});
   EXPECT_EQ(utf8("自訂覆寫"),
             inlineConverter->Convert(std::string_view(utf8("燕燕于飞"))));
+}
+
+TEST_F(ConfigTest, GroupDictWithoutMatchPolicyDefaultsToShortCircuit) {
+  const std::string json =
+      std::string("{\n"
+                  "  \"name\": \"Legacy Group Policy Test\",\n"
+                  "  \"segmentation\": {\n"
+                  "    \"type\": \"mmseg\",\n"
+                  "    \"dict\": {\"type\": \"text\", \"file\": \"config_test_phrases.txt\"}\n"
+                  "  },\n"
+                  "  \"conversion_chain\": [{\n"
+                  "    \"dict\": {\n"
+                  "      \"type\": \"group\",\n"
+                  "      \"dicts\": [\n"
+                  "        {\n"
+                  "          \"type\": \"inline\",\n"
+                  "          \"entries\": {\n"
+                  "            \"燕燕于飞\": \"自訂覆寫\"\n"
+                  "          }\n"
+                  "        },\n"
+                  "        {\"type\": \"text\", \"file\": \"config_test_phrases.txt\"}\n"
+                  "      ]\n"
+                  "    }\n"
+                  "  }]\n"
+                  "}\n");
+
+  testing::internal::CaptureStderr();
+  const ConverterPtr legacyConverter =
+      config.NewFromString(json, {CONFIG_TEST_DIR_PATH + "/"});
+  const std::string warning = testing::internal::GetCapturedStderr();
+  EXPECT_NE(std::string::npos,
+            warning.find("warning: config does not conform to schema"));
+  EXPECT_EQ(utf8("自訂覆寫"),
+            legacyConverter->Convert(std::string_view(utf8("燕燕于飞"))));
 }
 
 TEST_F(ConfigTest, UnionDictGroupPrefersLaterLongerMatch) {
@@ -712,10 +824,15 @@ TEST_F(ConfigTest, InlineDictPreservesExactStringSemantics) {
 TEST_F(ConfigTest, InlineDictValidationErrors) {
   const auto ExpectInvalidFormat = [this](const std::string& json,
                                           const std::string& expectedMessage) {
+    testing::internal::CaptureStderr();
     try {
       const ConverterPtr _ = config.NewFromString(json, "");
+      (void)testing::internal::GetCapturedStderr();
       FAIL() << "Expected InvalidFormat";
     } catch (const InvalidFormat& e) {
+      const std::string warning = testing::internal::GetCapturedStderr();
+      EXPECT_NE(std::string::npos,
+                warning.find("warning: config does not conform to schema"));
       EXPECT_NE(std::string::npos,
                 std::string(e.what()).find(expectedMessage));
     }
@@ -892,6 +1009,7 @@ TEST_F(ConfigTest, InlineSegmentationAndConversionWorksWithOcd2GroupDicts) {
                   "    \"type\": \"mmseg\",\n"
                   "    \"dict\": {\n"
                   "      \"type\": \"group\",\n"
+                  "      \"match_policy\": \"short_circuit\",\n"
                   "      \"dicts\": [\n"
                   "        {\n"
                   "          \"type\": \"inline\",\n"
@@ -907,6 +1025,7 @@ TEST_F(ConfigTest, InlineSegmentationAndConversionWorksWithOcd2GroupDicts) {
                   "    {\n"
                   "      \"dict\": {\n"
                   "        \"type\": \"group\",\n"
+                  "        \"match_policy\": \"short_circuit\",\n"
                   "        \"dicts\": [\n"
                   "          {\n"
                   "            \"type\": \"inline\",\n"
@@ -999,6 +1118,96 @@ TEST_F(ConfigTest, NormalizationMissingFileDictThrows) {
   })";
   Config c;
   EXPECT_THROW(c.NewFromString(config, CONFIG_TEST_DIR_PATH), Exception);
+}
+
+TEST_F(ConfigTest, NormalizationGetConversionChainIsNonNull) {
+  // Regression: converters built from configs with a normalization field must
+  // expose a non-null GetConversionChain() so that downstream consumers such
+  // as librime do not crash on null-pointer dereference.
+  // The returned chain must represent the main conversion_chain (乙→丙), not
+  // the normalization chain (甲→乙).
+  const std::string config = R"({
+    "name": "Normalization Chain Test",
+    "normalization": [{"dict": {"type": "inline", "entries": {"甲": "乙"}}}],
+    "conversion_chain": [{"dict": {"type": "inline", "entries": {"乙": "丙"}}}]
+  })";
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, CONFIG_TEST_DIR_PATH);
+  const ConversionChainPtr chain = conv->GetConversionChain();
+  ASSERT_NE(nullptr, chain);
+  const std::list<ConversionPtr> conversions = chain->GetConversions();
+  ASSERT_FALSE(conversions.empty());
+  ASSERT_NE(nullptr, conversions.front()->GetDict());
+  EXPECT_FALSE(conversions.front()->GetDict()->Match(utf8("乙")).IsNull());
+  EXPECT_TRUE(conversions.front()->GetDict()->Match(utf8("甲")).IsNull());
+
+  // Verify it is the main chain: 乙 → 丙 (not the normalization chain 甲 → 乙).
+  const SegmentsPtr result = chain->Convert(SegmentsPtr(new Segments{utf8("乙")}));
+  ASSERT_EQ(1u, result->Length());
+  EXPECT_EQ(utf8("丙"), result->At(0));
+}
+
+TEST_F(ConfigTest, RimeConvertWordExactExpansionThreadsThroughChain) {
+  const fs::path tempDir = MakeTempDir("opencc-rime-exact-expansion-test");
+  WriteFile(tempDir / "first.txt", utf8("里\t裏 里 哩\n"));
+
+  const std::string config = ChainConfig({
+      "{\"type\": \"text\", \"file\": \"first.txt\"}",
+      "{\n"
+      "        \"type\": \"inline\",\n"
+      "        \"entries\": {\"裏\": \"裡\"}\n"
+      "      }",
+  });
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, PathString(tempDir));
+
+  std::vector<std::string> converted;
+  EXPECT_TRUE(ConvertWordLikeRime(conv->GetConversionChain(), utf8("里"),
+                                  &converted));
+  EXPECT_EQ((std::vector<std::string>{utf8("裡"), utf8("里"), utf8("哩")}),
+            converted);
+
+  fs::remove_all(tempDir);
+}
+
+TEST_F(ConfigTest, RimeConvertWordPartialFallbackContinuesToNextStage) {
+  const std::string config = ChainConfig({
+      "{\n"
+      "        \"type\": \"inline\",\n"
+      "        \"entries\": {\"内\": \"內\"}\n"
+      "      }",
+      "{\n"
+      "        \"type\": \"inline\",\n"
+      "        \"entries\": {\"內存\": \"記憶體\"}\n"
+      "      }",
+  });
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, CONFIG_TEST_DIR_PATH);
+
+  std::vector<std::string> converted;
+  EXPECT_TRUE(ConvertWordLikeRime(conv->GetConversionChain(), utf8("内存"),
+                                  &converted));
+  EXPECT_EQ((std::vector<std::string>{utf8("記憶體")}), converted);
+}
+
+TEST_F(ConfigTest, RimeConvertWordReturnsFalseWithoutAnyExactMatch) {
+  const std::string config = ChainConfig({
+      "{\n"
+      "        \"type\": \"inline\",\n"
+      "        \"entries\": {\"a\": \"A\"}\n"
+      "      }",
+      "{\n"
+      "        \"type\": \"inline\",\n"
+      "        \"entries\": {\"z\": \"Z\"}\n"
+      "      }",
+  });
+  Config c;
+  const ConverterPtr conv = c.NewFromString(config, CONFIG_TEST_DIR_PATH);
+
+  std::vector<std::string> converted;
+  EXPECT_FALSE(ConvertWordLikeRime(conv->GetConversionChain(), "abc",
+                                   &converted));
+  EXPECT_EQ((std::vector<std::string>{"Abc"}), converted);
 }
 
 } // namespace opencc
