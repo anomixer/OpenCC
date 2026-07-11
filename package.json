@@ -25,6 +25,7 @@
   },
   "scripts": {
     "test": "node --test --test-reporter=spec node/test.js && node node/esm-test.mjs",
+    "generate:node-config-types": "node scripts/generate-node-opencc-config-types.js",
     "prebuild": "prebuildify --napi --strip --postinstall \"node scripts/prepare-node-prebuild-artifacts.js\"",
     "prepare:scoped-packages": "node scripts/prepare-node-scoped-packages.js",
     "prepack": "node scripts/verify-node-main-package.js",
@@ -63,6 +64,7 @@
     "prebuilds/assets/*.ocd2",
     "scripts/prepare-node-prebuild-artifacts.js",
     "scripts/install.js",
+    "scripts/generate-node-opencc-config-types.js",
     "scripts/prepare-node-scoped-packages.js",
     "scripts/verify-node-main-package.js",
     "scripts/verify-node-scoped-packages-published.js",
@@ -72,6 +74,7 @@
     "src/Common.hpp",
     "src/Config.cpp",
     "src/Config.hpp",
+    "src/ConfigBasedConverter.hpp",
     "src/Conversion.cpp",
     "src/Conversion.hpp",
     "src/ConversionChain.cpp",
@@ -98,9 +101,12 @@
     "src/MaxMatchSegmentation.cpp",
     "src/MaxMatchSegmentation.hpp",
     "src/opencc.h",
+    "src/opencc_config_schema.inc",
     "src/Optional.hpp",
     "src/PhraseExtract.cpp",
     "src/PhraseExtract.hpp",
+    "src/PipelineConverter.cpp",
+    "src/PipelineConverter.hpp",
     "src/plugin/OpenCCPlugin.h",
     "src/PluginSegmentation.cpp",
     "src/PluginSegmentation.hpp",
@@ -117,6 +123,8 @@
     "src/SerializedValues.hpp",
     "src/SimpleConverter.cpp",
     "src/SimpleConverter.hpp",
+    "src/SingleStageConverter.cpp",
+    "src/SingleStageConverter.hpp",
     "src/TextDict.cpp",
     "src/TextDict.hpp",
     "src/UTF8StringSlice.cpp",
@@ -142,6 +150,7 @@
     "Traditional Chinese"
   ],
   "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4",
     "prebuildify": "^6.0.1"
   },
   "dependencies": {
