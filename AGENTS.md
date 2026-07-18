@@ -28,10 +28,10 @@ This document compiles the Open Chinese Convert (OpenCC) project information to 
 - The command-line tool `opencc_dict` supports `text ↔ ocd2` (and optionally `ocd`) conversion. When adding or adjusting dictionaries, first edit `.txt`, then run the tool to generate the target format.
 
 ## Development and Testing
-- The top-level build system supports CMake, Bazel, Node.js `binding.gyp`, Python `pyproject.toml`, with cross-platform CI integration.
+- The top-level build system supports CMake, Bazel, Python `pyproject.toml`, with cross-platform CI integration. The Node.js native addon is built with Bazel (`//node:opencc`).
 - `src/*Test.cpp`, `data/config/*Test.cpp`, `plugins/jieba/tests/`, `test/`, and `test/golden/` contain tests covering dictionary matching, conversion chains, configuration validation, plugin segmentation, CLI behavior, and golden conversion outputs.
 - Tools `opencc_dict`, `opencc_phrase_extract` (`src/tools/`) help developers convert dictionary formats and extract phrases.
-- Node.js tests live in `node/test.js`; npm prebuild packaging uses `npm run prebuild` and related scripts in `scripts/`.
+- Node.js tests live in `node/test.js`. npm prebuilt binaries are built with Bazel via `scripts/build-node-prebuild-bazel.sh` (see `node/PUBLISHING.md`). The `binding.gyp`/node-gyp source-build fallback has been replaced by a Bazel one: the native addon comes from `@opencc/opencc-<platform>-<arch>` scoped packages, and on platforms without one `scripts/install.js` runs a full Bazel source build at install time (compiles `//node:opencc`, regenerates `//data/dictionary:binary_dictionaries`, and refreshes `prebuilds/assets`; prebuilt assets still ship in the tarball for the scoped-package path).
 
 ### C++ ABI Versioning
 - When a change introduces an ABI-incompatible modification to the public C++ interface, bump `OPENCC_ABI_VERSION` in `CMakeLists.txt` so downstream libraries and applications relink instead of silently loading an incompatible `libopencc` shared library.
@@ -52,10 +52,13 @@ This document compiles the Open Chinese Convert (OpenCC) project information to 
 - README lists third-party Swift, Java, Go, WebAssembly and other porting projects, showcasing ecosystem breadth.
 
 ## Optional Plugin and Release Packaging
-- `BUILD_OPENCC_JIEBA_PLUGIN=ON` enables the C++ jieba plugin in CMake builds; default builds do not require it.
+- `BUILD_OPENCC_JIEBA_PLUGIN` enables the C++ jieba plugin in CMake builds. Since 1.4.1 it defaults to ON for top-level macOS builds (so Homebrew ships the plugin); other platforms, subproject builds (FetchContent / `add_subdirectory`), and Python wheel builds keep it OFF.
+- The merged jieba dictionary (`jieba_dict/jieba_merged.ocd2`) is generated at build time by `opencc_dict --from cppjieba_utf8`; there is no separate dictionary helper tool. Standalone plugin builds locate an installed `opencc_dict` and require OpenCC >= 1.4.1.
+- Source packages: `OPENCC_SOURCE_PACKAGE_PROFILE` (`full` / `opencc` / `opencc-jieba`) selects which CPack source archive is produced. The `opencc` profile is the trimmed C++-only package (no Node.js, Python, docs, packaging, or `plugins/`) and is intentionally buildable with **both** CMake and Bazel, so Bazel workspace files (`BUILD.bazel`, `MODULE.bazel[.lock]`, `.bazelrc`, `.bazelversion`, `.bazelignore`) and the top-level `patches/` directory (referenced by `MODULE.bazel`) are kept; only `.bazelrc.user` is dropped. When editing the trimmed ignore list, do not re-exclude Bazel files or `patches/`. `release-source.yml` builds this package on a `ver.*` tag (or `workflow_dispatch` with `release_tag`), smoke-tests it with CMake and Bazel, and uploads it to the draft release.
 - `plugins/README.md` documents plugin loading, ABI expectations, and standalone plugin builds.
 - `scripts/release-windows-winget.ps1` is the Windows portable/WinGet release path and produces the CLI zip, checksum, and WinGet manifests.
 - npm release packaging is separate from the native CLI release: `opencc` and `opencc-jieba` are packed as npm `.tgz` artifacts and should be install-tested together when plugin-backed npm configs are changed.
+- Release flow (since 1.4.1) is draft-first: publish the `@opencc/*` scoped binary packages via the `release-npm-binaries` workflow_dispatch, then push a `ver.*` tag. The tag creates a draft GitHub release (`release-draft.yml`, notes taken from the matching NEWS.md section) and the deb/doc/resource/winget workflows upload assets to the draft; everything up to this point is reversible. Manually publishing the release then triggers `release-npm` (main npm packages) and `release-pypi` — the irreversible publishes.
 
 ## Common Customization Steps
 1. Edit or add dictionary entries in `data/dictionary/*.txt`.

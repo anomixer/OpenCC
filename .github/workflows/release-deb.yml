@@ -2,6 +2,11 @@ name: Debian Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to upload the built packages to, for example ver.1.4.1. Leave empty to only build artifacts."
+        required: false
+        type: string
   push:
     tags:
       - "ver.*"
@@ -22,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debhelper cmake ninja-build pkg-config doxygen \
+            build-essential debhelper cmake ninja-build pkg-config doxygen \
             libmarisa-dev rapidjson-dev libtclap-dev \
             googletest libgtest-dev
 
@@ -38,50 +43,24 @@ jobs:
           path: dist/*.deb
 
   build-arm64:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Set up arm64 cross-compilation environment
+      - name: Install build dependencies
         run: |
-          sudo rm -f /etc/apt/sources.list
-          sudo find /etc/apt/sources.list.d -maxdepth 1 \
-            \( -name '*.list' -o -name '*.sources' \) -exec rm -f {} +
-          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/opencc-cross.sources >/dev/null
-          Types: deb
-          URIs: http://archive.ubuntu.com/ubuntu
-          Suites: noble noble-updates noble-backports
-          Components: main restricted universe multiverse
-          Architectures: amd64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-          Types: deb
-          URIs: http://security.ubuntu.com/ubuntu
-          Suites: noble-security
-          Components: main restricted universe multiverse
-          Architectures: amd64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-          Types: deb
-          URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-backports noble-security
-          Components: main restricted universe multiverse
-          Architectures: arm64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          EOF
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debhelper cmake ninja-build pkg-config \
-            crossbuild-essential-arm64 \
-            libmarisa-dev:arm64 rapidjson-dev libtclap-dev \
+            build-essential debhelper cmake ninja-build pkg-config doxygen \
+            libmarisa-dev rapidjson-dev libtclap-dev \
             googletest libgtest-dev
 
       - name: Build arm64 packages
         env:
           DIST_DIR: ${{ github.workspace }}/dist
           BUILD_MODE: any-only
-          TARGET_ARCH: arm64
         run: bash scripts/build-deb-packages.sh
 
       - uses: actions/upload-artifact@v4
@@ -114,11 +93,19 @@ jobs:
             -l packaging/debian/debian/changelog -S version)
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Assemble zip with checksums
+      - name: Assemble per-architecture zips with checksums
         run: |
           cd dist
-          sha256sum ./*.deb > SHA256SUMS
-          zip "opencc-${{ steps.version.outputs.value }}-deb.zip" ./*.deb SHA256SUMS
+          version="${{ steps.version.outputs.value }}"
+          for arch in amd64 arm64; do
+            stage="deb-$arch-stage"
+            mkdir "$stage"
+            cp ./*_"$arch".deb "$stage"/
+            cp ./*_all.deb "$stage"/
+            (cd "$stage" && sha256sum ./*.deb > SHA256SUMS && \
+             zip "../opencc-$version-deb-$arch.zip" ./*.deb SHA256SUMS)
+            rm -r "$stage"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -126,10 +113,16 @@ jobs:
           path: dist/opencc-*.zip
 
       - name: Upload to GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.ref_name }}" \
-            "dist/opencc-${{ steps.version.outputs.value }}-deb.zip" \
+          tag="${{ inputs.release_tag || github.ref_name }}"
+          for i in $(seq 1 30); do
+            gh release view "$tag" --json isDraft > /dev/null 2>&1 && break
+            echo "Waiting for release $tag to be created ($i/30)..."
+            sleep 10
+          done
+          gh release upload "$tag" \
+            dist/opencc-*-deb-*.zip \
             --clobber
